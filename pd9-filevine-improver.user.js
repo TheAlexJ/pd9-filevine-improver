@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         PD9 Filevine Improver
 // @namespace    https://filevine.local/pd9-improver
-// @version      3.6.0
-// @description  Press N or T in a case for a floating note or task box with templates. Project Hub links open to Activity.
+// @version      3.16.1
+// @description  Faster notes, tasks, and case closing in Filevine for PD9.
 // @match        https://*.filevine.com/*
 // @match        https://*.filevineapp.com/*
 // @match        https://*.filevinegov.com/*
@@ -696,6 +696,7 @@
 
     const overlay = document.createElement('div');
     overlay.id = 'pd9-options';
+    overlay.className = 'pd9-overlay';
     overlay.innerHTML = `
       <div class="pd9-dialog" role="dialog" aria-modal="true" aria-labelledby="pd9-title">
         <div class="pd9-head">
@@ -866,9 +867,585 @@
     f.label.focus();
   }
 
+  // ---------- "Improved Close" on the Sentence tab ----------
+  // One button runs the office's closing steps:
+  //   1. opens a new Sentence item and fills the safe parts (dates, notes outline)
+  //   2. shows hints next to the fields that need judgment
+  //   3. after you click Create, offers to set the phase to Closed and takes you
+  //      to Case Summary with User Status highlighted
+  const CLOSE_FILL = {
+    sentenceDateToday: true,     // Sentence date = today (change it if sentencing was earlier)
+    dispositionDateToday: true,  // Disposition Date = today
+    notesOutline: '',            // text to start Disposition Notes with ('' = leave it empty)
+  };
+  // Short reminders from the office closing guide, shown under each label.
+  const CLOSE_HINTS = {
+    dispositionaction: 'How the case resolved: negotiated plea, nolle pros, jury trial not guilty, etc.',
+    sentencetype: 'Pick the harsher part (county jail then probation = County Jail). Put the rest in Disposition Notes.',
+    dispositiontype: 'Most serious charge resolved, and the most serious charge you worked up.',
+    dispositionnotes: 'The rest of the sentence that Sentence Type does not cover.',
+  };
+
+  const onSentenceTab = () => /\/custom\/[^/?#]*sentence/i.test(location.href);
+  const sentenceForm = () => [...document.querySelectorAll('form.project-item-edit-form')]
+    .find((f) => f.querySelector('[name^="sentencetype"]') && f.querySelector('[name^="dispositionaction"]')) || null;
+  const fieldIn = (form, prefix) => [...form.querySelectorAll(`[name^="${prefix}"]`)]
+    .find((el) => /^\D+\d+$/.test(el.name) && el.name.replace(/\d+$/, '') === prefix) || null;
+
+  function addCloseButton() {
+    if (!onSentenceTab()) return;
+    const add = document.getElementById('add-an-item');
+    if (!add || document.getElementById('pd9-improved-close')) return;
+    const btn = add.cloneNode(false); // same Filevine button style, none of its behavior
+    btn.id = 'pd9-improved-close';
+    btn.removeAttribute('ng-click');
+    btn.className = add.className;
+    btn.innerHTML = '<i class="fa fa-flag-checkered"></i> Improved Close';
+    btn.title = 'Start a closing Sentence entry, then finish closing the case';
+    btn.style.marginLeft = '8px';
+    btn.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); startImprovedClose(); });
+    add.after(btn);
+  }
+
+  // Type into an Angular or Svelte field so Filevine notices.
+  function setFieldValue(el, value) {
+    const proto = el.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+    Object.getOwnPropertyDescriptor(proto, 'value').set.call(el, value);
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+    el.dispatchEvent(new Event('change', { bubbles: true }));
+    el.dispatchEvent(new FocusEvent('blur'));
+  }
+
+  const mdY = (d = new Date()) => `${String(d.getMonth() + 1).padStart(2, '0')}/${String(d.getDate()).padStart(2, '0')}/${d.getFullYear()}`;
+
+  let closeFlow = null; // { projectId } while a closing entry is being filled out
+
+  async function startImprovedClose() {
+    let form = sentenceForm();
+    if (!form) {
+      const add = document.getElementById('add-an-item');
+      if (!add) { toast('Could not find "Add an Item" on this tab.'); return; }
+      add.click();
+      form = await waitFor(sentenceForm, 4000);
+      if (!form) { toast('The Sentence form did not open.'); return; }
+    }
+    await sleep(150); // let Filevine finish drawing the form
+
+    const fill = (prefix, value) => {
+      const el = fieldIn(form, prefix);
+      if (el && !el.value.trim()) setFieldValue(el, value);
+    };
+    if (CLOSE_FILL.sentenceDateToday) fill('sentencedate', mdY());
+    if (CLOSE_FILL.dispositionDateToday) fill('dispositiondate', mdY());
+    if (CLOSE_FILL.notesOutline) fill('dispositionnotes', CLOSE_FILL.notesOutline);
+
+    closeFlow = { projectId: projectId() };
+    const first = fieldIn(form, 'dispositionaction');
+    if (first) { first.scrollIntoView({ block: 'center', behavior: 'smooth' }); first.focus(); }
+    toast('Fill in the rest, then click Create.');
+  }
+
+  // Hints under the labels of the Sentence form (shown any time the form is open).
+  function addCloseHints() {
+    const form = sentenceForm();
+    if (!form) return;
+    for (const [prefix, text] of Object.entries(CLOSE_HINTS)) {
+      const el = fieldIn(form, prefix);
+      const label = el && form.querySelector(`#label-${CSS.escape(el.name)}`);
+      const holder = label && (label.closest('field-label') || label).parentElement;
+      if (!holder || holder.nextElementSibling?.classList.contains('pd9-hint')) continue;
+      const hint = document.createElement('div');
+      hint.className = 'pd9-hint';
+      hint.textContent = text;
+      holder.after(hint);
+    }
+  }
+
+  // Watch for Create on the Sentence form while a close is in progress.
+  document.addEventListener('click', async (e) => {
+    if (!closeFlow) return;
+    const btn = e.target.closest && e.target.closest('#collection-top-save, #collection-bottom-save');
+    if (!btn || btn.disabled) return;
+    const flow = closeFlow;
+    // Saved = the form goes away. If it is still there after 10 seconds,
+    // something needs fixing (a required field), so we wait for the next Create.
+    const gone = await waitFor(() => !sentenceForm(), 10000);
+    if (gone && closeFlow === flow && projectId() === flow.projectId) {
+      closeFlow = null;
+      finishClose(flow.projectId);
+    }
+  }, true);
+
+  const phaseSelect = () => $('[data-testid="project-phase-selector"] select');
+  const phaseText = () => { const t = $('[data-testid="project-phase-selector"] .text-container'); return t ? t.textContent.trim() : ''; };
+
+  function selectByText(select, text) {
+    const opt = [...select.options].find((o) => o.textContent.trim().toLowerCase() === text.toLowerCase());
+    if (!opt) return false;
+    if (select.value !== opt.value) {
+      select.value = opt.value;
+      select.dispatchEvent(new Event('input', { bubbles: true }));
+      select.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+    return true;
+  }
+
+  function findUserStatus() {
+    const label = [...document.querySelectorAll('label')].find((l) => l.textContent.trim() === 'User Status' && isVisible(l));
+    if (!label) return null;
+    const field = label.closest('.custom-field') || label.parentElement.parentElement;
+    return { field, select: field.querySelector('select') };
+  }
+
+  // The Save button for the section that holds this field.
+  function findSectionSave(el) {
+    const isSave = (b) => isVisible(b) && /^save$/i.test(b.textContent.trim());
+    const form = el.closest('form');
+    return (form && [...form.querySelectorAll('button')].find(isSave)) ||
+      [...document.querySelectorAll('#collection-top-save, #collection-bottom-save, button')].find(isSave) || null;
+  }
+
+  function flash(el, on) { if (el) el.classList.toggle('pd9-flash', on); }
+
+  // After the Sentence entry saves: go to Case Summary, set User Status and the
+  // phase to Closed, then ask the person to double-check before saving.
+  async function finishClose(pid) {
+    toast('Sentence saved. Opening Case Summary...');
+    const link = $('a[href*="/custom/casesummary"]');
+    if (link && !/\/custom\/casesummary/.test(location.href)) location.hash = new URL(link.href, location.href).hash;
+
+    const us = await waitFor(() => { const f = findUserStatus(); return f && f.select ? f : null; }, 8000);
+    if (projectId() !== pid) return; // moved to another case, stop
+    const usSet = us ? selectByText(us.select, 'Closed') : false;
+
+    const ps = phaseSelect();
+    const wasPhase = phaseText();
+    const canPhase = !!(ps && [...ps.options].some((o) => o.textContent.trim().toLowerCase() === 'closed'));
+
+    const phaseBox = $('[data-testid="project-phase-selector"]');
+    if (us) { us.field.scrollIntoView({ block: 'center', behavior: 'smooth' }); flash(us.field, true); }
+    flash(phaseBox, true);
+
+    // A small panel in the corner, so the highlighted fields stay visible.
+    const panel = document.createElement('div');
+    panel.className = 'pd9-panel';
+    panel.setAttribute('role', 'dialog');
+    panel.setAttribute('aria-label', 'Double-check before saving');
+    const row = (ok, text) => `<li class="${ok ? '' : 'pd9-warn'}">${ok ? '&#10003;' : '!'} ${text}</li>`;
+    panel.innerHTML = `
+      <h3>Double-check before saving</h3>
+      <ul>
+        ${row(usSet, usSet ? 'User Status set to <b>Closed</b> (outlined in orange)' : 'Could not set User Status. Pick <b>Closed</b> yourself.')}
+        ${row(canPhase, canPhase ? `Phase will change from <b>${escapeAttr(wasPhase || 'Open')}</b> to <b>Closed</b>` : 'Could not find the phase picker. Change it at the top of the case.')}
+      </ul>
+      <div class="pd9-panel-btns">
+        <button type="button" class="pd9-btn pd9-cancel">Cancel</button>
+        <button type="button" class="pd9-btn pd9-primary pd9-go">Save and close case</button>
+      </div>`;
+    document.body.appendChild(panel);
+    const q = (sel) => panel.querySelector(sel);
+    const done = () => { panel.remove(); flash(us && us.field, false); flash(phaseBox, false); };
+    q('.pd9-cancel').addEventListener('click', () => { done(); toast('Nothing saved. User Status was changed but not saved.'); });
+    q('.pd9-go').addEventListener('click', async () => {
+      q('.pd9-go').disabled = true;
+      q('.pd9-go').textContent = 'Saving...';
+
+      // 1) Save Case Summary.
+      let saved = true;
+      if (us) {
+        const save = await waitFor(() => { const b = findSectionSave(us.select); return b && !b.disabled ? b : null; }, 3000);
+        if (save) {
+          save.click();
+          // Saved = the button settles back to disabled, or the section redraws.
+          saved = !!(await waitFor(() => !document.contains(save) || save.disabled, 8000));
+        } else {
+          saved = false;
+        }
+      }
+
+      // 2) Change the phase (Filevine saves this one on its own).
+      let phased = !canPhase;
+      if (canPhase) {
+        selectByText(phaseSelect(), 'Closed');
+        phased = !!(await waitFor(() => phaseText().toLowerCase() === 'closed', 5000));
+      }
+
+      done();
+      toast(saved && phased
+        ? 'Case closed: User Status and phase are both Closed.'
+        : `Check the case: ${saved ? '' : 'Case Summary may not have saved. '}${phased ? '' : 'Phase may not have changed.'}`.trim());
+    });
+    q('.pd9-go').focus();
+  }
+
+  // ---------- case numbers: one reader for every format we've seen ----------
+  //   24-CF-002415-A-OS    2026-OC-000346-A-OS    07CT006158AOS    06DF000228AOS
+  //   24 CF 2415 A OS      24cf2415               2024-CF-2415
+  // Parts: year (2 or 4 digits), court type (2 letters), number (up to 7 digits,
+  // often zero-padded to 6), defendant letter (optional), county (optional, OR/OS).
+  const CASE_PART_RX = /(?<![a-z0-9])(\d{4}|\d{2})[\s\-_]*([a-z]{2})[\s\-_]*(\d{1,7})(?:[\s\-_]*([a-z])[\s\-_]*([a-z]{2})|[\s\-_]*([a-z]))?(?![a-z0-9])/gi;
+
+  const twoDigitYear = (y) => (y.length === 4 ? y.slice(2) : y);
+  const stripZeros = (n) => n.replace(/^0+(?=\d)/, '');
+
+  // Every case number found in a piece of text, normalized.
+  function readCaseNumbers(text) {
+    const out = [];
+    for (const m of String(text || '').matchAll(CASE_PART_RX)) {
+      const [, year, type, num, def, county, defOnly] = m;
+      out.push({
+        raw: m[0],
+        year: twoDigitYear(year),
+        type: type.toUpperCase(),
+        num: stripZeros(num),
+        def: (def || defOnly || '').toUpperCase(),
+        county: (county || '').toUpperCase(),
+      });
+    }
+    return out;
+  }
+
+  // What someone typed into Case# Search, STAC style. Returns a list of possible
+  // meanings (an all-digit entry like 20261234 could be year 2026 or year 20).
+  //   241234      -> year 24, number 1234 (001234), any type, any county
+  //   24cf1234    -> also type CF
+  //   24cf1234os  -> also county OS (24cf1234aos / 24-CF-001234-A-OS work too)
+  function readCaseQuery(input) {
+    const t = String(input || '').trim().toUpperCase().replace(/[\s\-_|]+/g, '');
+    if (!t) return [];
+    let m = t.match(/^(\d{4}|\d{2})([A-Z]{2})(\d{1,7})(?:([A-Z])?([A-Z]{2}))?$|^(\d{4}|\d{2})([A-Z]{2})(\d{1,7})([A-Z])$/);
+    if (m) {
+      if (m[1]) return [{ year: twoDigitYear(m[1]), type: m[2], num: stripZeros(m[3]), def: m[4] || '', county: m[5] || '' }];
+      return [{ year: twoDigitYear(m[6]), type: m[7], num: stripZeros(m[8]), def: m[9], county: '' }];
+    }
+    m = t.match(/^(\d+)$/);
+    if (!m || t.length < 3) return [];
+    const options = [{ year: t.slice(0, 2), type: '', num: stripZeros(t.slice(2)), def: '', county: '' }];
+    const y4 = +t.slice(0, 4);
+    if (t.length >= 7 && y4 >= 1990 && y4 <= new Date().getFullYear() + 1) {
+      options.push({ year: t.slice(2, 4), type: '', num: stripZeros(t.slice(4)), def: '', county: '' });
+    }
+    return options;
+  }
+
+  // Does a case number fit what was typed? Same year and the same number
+  // (leading zeros don't matter: 1234 = 001234). Type, defendant letter, and
+  // county only count if you typed them.
+  function caseFits(q, c) {
+    return c.year === q.year && c.num === q.num &&
+      (!q.type || c.type === q.type) && (!q.def || c.def === q.def) && (!q.county || c.county === q.county);
+  }
+  // Text of an element with a space between each piece, so "...AOS" and the next
+  // line never run together (textContent glues them: "000228AOSBrian").
+  function spacedText(el) {
+    const parts = [];
+    const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+    for (let n = walker.nextNode(); n; n = walker.nextNode()) parts.push(n.nodeValue);
+    return parts.join(' ').replace(/\s+/g, ' ');
+  }
+  const textFitsCaseQuery = (text, input) => {
+    const qs = readCaseQuery(input);
+    return qs.length > 0 && readCaseNumbers(text).some((c) => qs.some((q) => caseFits(q, c)));
+  };
+
+  // Find's "Case #" box: a full case number (with letters, or 6+ digits) uses the
+  // STAC reader; a few digits match the end of the number (0228 finds ...000228).
+  function textHasCase(text, entry) {
+    const raw = String(entry || '').trim();
+    if (/[a-z]/i.test(raw) || raw.replace(/\D/g, '').length >= 6) return textFitsCaseQuery(text, raw);
+    const tail = stripZeros(raw.replace(/\D/g, ''));
+    return !!tail && readCaseNumbers(text).some((c) => c.num.endsWith(tail));
+  }
+
+  // ---------- "Find" search helper (next to Filevine's search box) ----------
+  // Fill in first name, last name, and/or the last digits of a case number.
+  // We type a smart search into Filevine's own box, then show ONLY the results
+  // that contain every field you filled in. Edit the search box to see everything.
+  let findFilter = null; // { query, first, last, caseNo }
+
+  const fold = (t) => (t || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+  const words = (t) => fold(t).split(/[^a-z0-9]+/).filter(Boolean);
+
+
+
+  const searchInput = () => document.getElementById('header-search-input');
+  function resultItems() {
+    const input = searchInput();
+    const box = input && document.getElementById(input.getAttribute('aria-controls'));
+    if (!box || !isVisible(box)) return { box: null, items: [], loading: false };
+    const loading = !!box.querySelector('[data-testid="fv-loading-spinner"], .loading-spinner');
+    // Result rows are the list's options (or its direct children). Only rows that
+    // look like a case ("Name | Case #" or a case number) are filtered; others are left alone.
+    const options = box.querySelectorAll('[role="option"]');
+    const rows = options.length ? [...options] : [...box.children];
+    const looksLikeCase = (t) => t.includes('|') || readCaseNumbers(t).length > 0;
+    return { box, items: rows.filter((el) => looksLikeCase(spacedText(el))), loading };
+  }
+
+
+  function findBadge(text) {
+    let badge = document.getElementById('pd9-find-badge');
+    const input = searchInput();
+    if (!text || !input) { if (badge) badge.remove(); return; }
+    if (!badge) {
+      badge = document.createElement('div');
+      badge.id = 'pd9-find-badge';
+      document.body.appendChild(badge);
+    }
+    // Sit just left of the search box, in the header, so it never covers results.
+    const r = input.getBoundingClientRect();
+    badge.style.right = `${Math.round(window.innerWidth - r.left + 8)}px`;
+    badge.style.top = `${Math.round(r.top + r.height / 2 - 11)}px`;
+    if (badge.textContent !== text) badge.textContent = text;
+  }
+
+  function applyFindFilter() {
+    const input = searchInput();
+    if (!findFilter) return;
+    if (!input || !input.value || input.value !== findFilter.query) { // search changed or cleared: show everything again
+      document.querySelectorAll('[data-pd9-hidden]').forEach((el) => { el.style.display = ''; el.removeAttribute('data-pd9-hidden'); });
+      findFilter = null;
+      findBadge('');
+      return;
+    }
+    const { box, items, loading } = resultItems();
+    if (!box) { findBadge(''); return; } // dropdown closed
+    if (!items.length) { findBadge(loading ? 'PD9 Find: searching...' : ''); return; }
+
+    const f = findFilter;
+    const nameTokens = [...words(f.first), ...words(f.last)];
+    const ok = (el) => {
+      const t = spacedText(el);
+      const w = words(t);
+      if (!nameTokens.every((tok) => w.some((x) => x.startsWith(tok)))) return false;
+      if (f.caseNo && !textHasCase(t, f.caseNo)) return false;
+      return true;
+    };
+    // Every field you filled in must be in the result. Nothing else is shown.
+    const keep = items.filter(ok);
+    for (const el of items) {
+      const hide = !keep.includes(el);
+      if (hide && el.style.display !== 'none') { el.style.display = 'none'; el.setAttribute('data-pd9-hidden', ''); }
+      if (!hide && el.hasAttribute('data-pd9-hidden')) { el.style.display = ''; el.removeAttribute('data-pd9-hidden'); }
+    }
+    findBadge(keep.length
+      ? `PD9 Find: ${keep.length} of ${items.length} match`
+      : loading ? 'PD9 Find: searching...' : 'PD9 Find: nothing matches every field. Try fewer fields or Search Deeper');
+  }
+
+  store.set('pd9-find-last', null); // earlier versions remembered the last search; forget it
+
+  function addFindButton() {
+    const input = searchInput();
+    if (!input || document.getElementById('pd9-find-btn')) return;
+    const host = input.closest('.search') || input.closest('.fvs-autocomplete') || input.parentElement;
+    const btn = document.createElement('button');
+    btn.id = 'pd9-find-btn';
+    btn.type = 'button';
+    btn.title = 'Search by first name, last name, or case number';
+    btn.innerHTML = '<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><circle cx="10" cy="10" r="6" fill="none" stroke="currentColor" stroke-width="2"/><path d="M15 15l5 5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg><span>Find</span>';
+    btn.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); toggleFindPanel(btn); });
+    host.after(btn);
+  }
+
+  function toggleFindPanel(btn) {
+    const open = document.getElementById('pd9-find');
+    if (open) { open.remove(); return; }
+    const panel = document.createElement('div');
+    panel.id = 'pd9-find';
+    panel.setAttribute('role', 'dialog');
+    panel.setAttribute('aria-label', 'Find a client');
+    panel.innerHTML = `
+      <div class="pd9-find-grid">
+        <label>First name<input name="first" autocomplete="off"></label>
+        <label>Last name<input name="last" autocomplete="off"></label>
+        <label class="pd9-span2">Case # (last digits or full number)<input name="caseNo" autocomplete="off"></label>
+      </div>
+      <div class="pd9-panel-btns">
+        <button type="button" class="pd9-btn pd9-clear">Clear</button>
+        <button type="button" class="pd9-btn pd9-primary pd9-go">Search</button>
+      </div>`;
+    document.body.appendChild(panel);
+    const r = btn.getBoundingClientRect();
+    panel.style.top = `${Math.round(r.bottom + 8)}px`;
+    panel.style.left = `${Math.max(8, Math.round(Math.min(r.left, window.innerWidth - 340)))}px`;
+
+    const f = Object.fromEntries(['first', 'last', 'caseNo'].map((n) => [n, panel.querySelector(`[name=${n}]`)]));
+    f.first.focus();
+
+    const go = () => {
+      const v = {
+        first: f.first.value.trim(),
+        last: f.last.value.trim(),
+        caseNo: f.caseNo.value.trim(),
+      };
+      if (!v.first && !v.last && !v.caseNo) { f.first.focus(); return; }
+      // What Filevine is good at: names. Use the case digits only when there is no name.
+      const query = [v.last, v.first].filter(Boolean).join(' ') || v.caseNo;
+      panel.remove();
+      const input = searchInput();
+      if (!input) { toast('Could not find the search box.'); return; }
+      findFilter = { query, ...v };
+      input.focus();
+      setInputValue(input, query);
+      input.dispatchEvent(new KeyboardEvent('keyup', { key: query.slice(-1), bubbles: true }));
+      applyFindFilter();
+    };
+    panel.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') { e.preventDefault(); go(); }
+      if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); panel.remove(); btn.focus(); }
+    });
+    panel.querySelector('.pd9-go').addEventListener('click', go);
+    panel.querySelector('.pd9-clear').addEventListener('click', () => {
+      Object.values(f).forEach((el) => { el.value = ''; });
+      f.first.focus();
+    });
+    // Click outside closes it.
+    setTimeout(() => document.addEventListener('mousedown', function away(e) {
+      if (!panel.isConnected) return document.removeEventListener('mousedown', away, true);
+      if (!panel.contains(e.target) && e.target !== btn && !btn.contains(e.target)) { panel.remove(); document.removeEventListener('mousedown', away, true); }
+    }, true), 0);
+  }
+
+  // ---------- Case# Search (STAC style) ----------
+  // Type 241234, 24cf1234, 24cf1234os, or a full case number. We open Filevine's
+  // full search page (projects only, archived included) with the number written
+  // the ways Filevine stores it, keep pressing "More", and show only real matches.
+  const CASE_SEARCH_KEY = 'pd9-case-search';
+  const CASE_SEARCH_MAX_MORE = 10; // how many times to press "More" at most
+
+  // The words we hand Filevine's search: just the year and the number, written
+  // the ways case numbers are stored (24 / 2024, 1234 / 001234). Filevine ranks
+  // results with more matching words first, so the right year comes up top.
+  function caseSearchTerms(qs) {
+    const terms = new Set();
+    for (const q of qs) {
+      terms.add(q.year);
+      terms.add(`20${q.year}`);
+      terms.add(q.num);
+      if (q.num.length < 6) terms.add(q.num.padStart(6, '0'));
+    }
+    return [...terms].join(' ');
+  }
+
+  function startCaseSearch(entry) {
+    const qs = readCaseQuery(entry);
+    if (!qs.length) { toast('Type a case number like 241234, 24cf1234, or 24-CF-001234-A-OS.'); return false; }
+    const q = caseSearchTerms(qs);
+    try { sessionStorage.setItem(CASE_SEARCH_KEY, JSON.stringify({ entry, q, more: 0, lastFits: -1 })); } catch (e) { /* ignore */ }
+    location.hash = `#/search?q=${encodeURIComponent(q)}&archived&projects&sort=Relevance`;
+    return true;
+  }
+
+  function activeCaseSearch() {
+    if (!/#\/search\?/.test(location.href)) return null;
+    let st = null;
+    try { st = JSON.parse(sessionStorage.getItem(CASE_SEARCH_KEY) || 'null'); } catch (e) { return null; }
+    // Compare loosely: Filevine may re-encode the address (spaces, + signs, case).
+    const loose = (t) => String(t || '').replace(/\+/g, ' ').replace(/\s+/g, ' ').trim().toLowerCase();
+    const q = new URLSearchParams(location.hash.split('?')[1] || '').get('q');
+    return st && loose(q) === loose(st.q) ? st : null;
+  }
+
+  let caseMoreBusy = false;
+  function applyCaseSearch() {
+    const st = activeCaseSearch();
+    const banner = document.getElementById('pd9-case-banner');
+    if (!st) { if (banner) banner.remove(); return; }
+    const page = $('search');
+    if (!page) return;
+    const cards = $$('.search-result', page);
+    let fits = 0;
+    for (const card of cards) {
+      // Only a case card counts, and only its TITLE: the case number in the
+      // title must have the year and the number. A match anywhere else
+      // (client details, notes, people) is hidden.
+      const isProject = card.classList.contains('search-result-project');
+      const heading = isProject && card.querySelector('h2');
+      const title = heading ? spacedText(heading) : '';
+      const ok = !!title && textFitsCaseQuery(title, st.entry);
+      if (ok) fits++;
+      const want = ok ? '' : 'none';
+      if (card.style.display !== want) card.style.display = want;
+    }
+    // Hide Filevine's own "N Results" count; it counts the hidden ones too.
+    const more = $$('button', page).find((b) => b.textContent.trim() === 'More' && isVisible(b) && !b.disabled);
+    const loading = !!page.querySelector('.fa-spin, [data-testid="fv-loading-spinner"], .loading');
+
+    // Keep pressing More while new pages keep turning up matches.
+    if (more && !caseMoreBusy && !loading && st.more < CASE_SEARCH_MAX_MORE && fits !== st.lastFits) {
+      caseMoreBusy = true;
+      const before = cards.length;
+      st.more += 1; st.lastFits = fits;
+      try { sessionStorage.setItem(CASE_SEARCH_KEY, JSON.stringify(st)); } catch (e) { /* ignore */ }
+      more.click();
+      waitFor(() => $$('.search-result', page).length > before, 8000).then(() => { caseMoreBusy = false; applyCaseSearch(); });
+    }
+
+    let bar = banner;
+    if (!bar) {
+      bar = document.createElement('div');
+      bar.id = 'pd9-case-banner';
+      document.body.appendChild(bar);
+    }
+    const still = caseMoreBusy || loading;
+    const text = `Case# Search "${st.entry}": ${fits} match${fits === 1 ? '' : 'es'}${still ? ', still looking...' : ''}` +
+      (!still && fits === 0 ? '. Try fewer parts, like 241234 instead of 24cf1234os.' : '');
+    if (bar.textContent !== text) bar.textContent = text;
+  }
+
+  function addCaseSearchButton() {
+    const find = document.getElementById('pd9-find-btn');
+    if (!find || document.getElementById('pd9-case-btn')) return;
+    const btn = find.cloneNode(false);
+    btn.id = 'pd9-case-btn';
+    btn.title = 'Search by case number, like STAC (241234, 24cf1234, 24-CF-001234-A-OS)';
+    btn.innerHTML = '<span>Case#</span>';
+    btn.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); toggleCasePanel(btn); });
+    find.after(btn);
+  }
+
+  function toggleCasePanel(btn) {
+    const open = document.getElementById('pd9-case');
+    if (open) { open.remove(); return; }
+    const panel = document.createElement('div');
+    panel.id = 'pd9-case';
+    panel.className = 'pd9-findlike';
+    panel.setAttribute('role', 'dialog');
+    panel.setAttribute('aria-label', 'Case number search');
+    panel.innerHTML = `
+      <label>Case number<input name="case" autocomplete="off" spellcheck="false"></label>
+      <p class="pd9-case-help">Year + number finds every court type and county: <b>241234</b> finds 24-CF-001234, 24-MM-001234, and so on. Narrow it with the type or county: <b>24cf1234</b>, <b>24cf1234os</b>.</p>
+      <div class="pd9-panel-btns">
+        <button type="button" class="pd9-btn pd9-primary pd9-go">Search</button>
+      </div>`;
+    document.body.appendChild(panel);
+    const r = btn.getBoundingClientRect();
+    panel.style.top = `${Math.round(r.bottom + 8)}px`;
+    panel.style.left = `${Math.max(8, Math.round(Math.min(r.left, window.innerWidth - 340)))}px`;
+    const input = panel.querySelector('input');
+    input.focus();
+    const go = () => { if (startCaseSearch(input.value.trim())) panel.remove(); else input.focus(); };
+    panel.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') { e.preventDefault(); go(); }
+      if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); panel.remove(); btn.focus(); }
+    });
+    panel.querySelector('.pd9-go').addEventListener('click', go);
+    setTimeout(() => document.addEventListener('mousedown', function away(e) {
+      if (!panel.isConnected) return document.removeEventListener('mousedown', away, true);
+      if (!panel.contains(e.target) && !btn.contains(e.target)) { panel.remove(); document.removeEventListener('mousedown', away, true); }
+    }, true), 0);
+  }
+
   function decorate() {
     watchProject();
     addOptionsMenuItem();
+    addCloseButton();
+    addCloseHints();
+    addFindButton();
+    addCaseSearchButton();
+    applyFindFilter();
+    applyCaseSearch();
     rewriteHubLinks();
     for (const form of $$(COMPOSERS)) {
       const layout = $(SEL.layout, form);
@@ -1026,7 +1603,7 @@
     const type = HOTKEYS[e.key.toLowerCase()];
     if (!type) return;
     if (e.ctrlKey || e.metaKey || e.altKey || e.shiftKey || e.repeat || e.isComposing) return;
-    if (!inCase() || isTyping(e) || document.getElementById('pd9-options')) return;
+    if (!inCase() || isTyping(e) || document.querySelector('.pd9-overlay')) return;
     e.preventDefault();
     openFloating(type);
   }, true);
@@ -1055,54 +1632,139 @@
     .fvqn-warn[hidden], .fvqn-bar[hidden], .fvqn-restore[hidden] { display: none !important; }
     /* Hide the Trending Tags box above the feed */
     .top-tags-note-filter { display: none !important; }
+    /* ---------- Sentence form: closing-a-case order ----------
+       Only the order on screen changes. Filevine saves the same fields as before.
+       The rows are flattened so fields can move between them, then each field
+       gets a place in line based on its name. Fields not listed go last. */
+    form.project-item-edit-form:has([name^="sentencetype"]):has([name^="dispositionaction"]) .custom-item-body > .flex-grid { display: flex !important; flex-wrap: wrap; }
+    form.project-item-edit-form:has([name^="sentencetype"]):has([name^="dispositionaction"]) .custom-item-body > .flex-grid > .form-group.row { display: contents !important; }
+    form.project-item-edit-form:has([name^="sentencetype"]):has([name^="dispositionaction"]) .custom-item-body > .flex-grid > .form-group.row > .custom-field { order: 200; float: none !important; flex: 0 0 100%; max-width: 100%; width: 100% !important; box-sizing: border-box; }
+    @media (min-width: 700px) { form.project-item-edit-form:has([name^="sentencetype"]):has([name^="dispositionaction"]) .custom-item-body > .flex-grid > .form-group.row > .custom-field { flex-basis: 50%; max-width: 50%; width: 50% !important; } }
+    @media (min-width: 1200px) { form.project-item-edit-form:has([name^="sentencetype"]):has([name^="dispositionaction"]) .custom-item-body > .flex-grid > .form-group.row > .custom-field { flex-basis: 25%; max-width: 25%; width: 25% !important; } }
+    form.project-item-edit-form:has([name^="sentencetype"]):has([name^="dispositionaction"]) .custom-item-body > .flex-grid > .form-group.row > .custom-field:has([name^="dispositionaction"]) { order: 10; }
+    form.project-item-edit-form:has([name^="sentencetype"]):has([name^="dispositionaction"]) .custom-item-body > .flex-grid > .form-group.row > .custom-field:has([name^="sentencetype"]) { order: 20; }
+    form.project-item-edit-form:has([name^="sentencetype"]):has([name^="dispositionaction"]) .custom-item-body > .flex-grid > .form-group.row > .custom-field:has([name^="othersentencetype"]) { order: 21; }
+    form.project-item-edit-form:has([name^="sentencetype"]):has([name^="dispositionaction"]) .custom-item-body > .flex-grid > .form-group.row > .custom-field:has([name^="amount"]):not(:has([name^="amounttype"])) { order: 22; }
+    form.project-item-edit-form:has([name^="sentencetype"]):has([name^="dispositionaction"]) .custom-item-body > .flex-grid > .form-group.row > .custom-field:has([name^="amounttype"]) { order: 23; }
+    form.project-item-edit-form:has([name^="sentencetype"]):has([name^="dispositionaction"]) .custom-item-body > .flex-grid > .form-group.row > .custom-field:has([name^="sentencedate"]) { order: 30; }
+    form.project-item-edit-form:has([name^="sentencetype"]):has([name^="dispositionaction"]) .custom-item-body > .flex-grid > .form-group.row > .custom-field:has([name^="dispositiondate"]) { order: 31; }
+    form.project-item-edit-form:has([name^="sentencetype"]):has([name^="dispositionaction"]) .custom-item-body > .flex-grid > .form-group.row > .custom-field:has([name^="adjudicated"]) { order: 40; }
+    form.project-item-edit-form:has([name^="sentencetype"]):has([name^="dispositionaction"]) .custom-item-body > .flex-grid > .form-group.row > .custom-field:has([name^="sentenceguideline"]) { order: 50; }
+    form.project-item-edit-form:has([name^="sentencetype"]):has([name^="dispositionaction"]) .custom-item-body > .flex-grid > .form-group.row > .custom-field:has([name^="guidelinerange"]) { order: 51; }
+    form.project-item-edit-form:has([name^="sentencetype"]):has([name^="dispositionaction"]) .custom-item-body > .flex-grid > .form-group.row > .custom-field:has([name^="f2_downwarddeparture"]) { order: 60; }
+    form.project-item-edit-form:has([name^="sentencetype"]):has([name^="dispositionaction"]) .custom-item-body > .flex-grid > .form-group.row > .custom-field:has([name^="downwarddeparture"]) { order: 61; }
+    form.project-item-edit-form:has([name^="sentencetype"]):has([name^="dispositionaction"]) .custom-item-body > .flex-grid > .form-group.row > .custom-field:has([name^="lowestdocsentencemonths"]) { order: 70; }
+    form.project-item-edit-form:has([name^="sentencetype"]):has([name^="dispositionaction"]) .custom-item-body > .flex-grid > .form-group.row > .custom-field:has([name^="enhancement"]) { order: 80; }
+    form.project-item-edit-form:has([name^="sentencetype"]):has([name^="dispositionaction"]) .custom-item-body > .flex-grid > .form-group.row > .custom-field:has([name^="sexenhancementdesignation"]) { order: 90; }
+    form.project-item-edit-form:has([name^="sentencetype"]):has([name^="dispositionaction"]) .custom-item-body > .flex-grid > .form-group.row > .custom-field:has([name^="dispositiontype"]) { order: 100; }
+    form.project-item-edit-form:has([name^="sentencetype"]):has([name^="dispositionaction"]) .custom-item-body > .flex-grid > .form-group.row > .custom-field:has([name^="dispositionchargereason"]) { order: 101; }
+    form.project-item-edit-form:has([name^="sentencetype"]):has([name^="dispositionaction"]) .custom-item-body > .flex-grid > .form-group.row > .custom-field:has([name^="notes"]) { order: 110; }
+    form.project-item-edit-form:has([name^="sentencetype"]):has([name^="dispositionaction"]) .custom-item-body > .flex-grid > .form-group.row > .custom-field:has([name^="dispositionnotes"]) { order: 120; }
+    form.project-item-edit-form:has([name^="sentencetype"]):has([name^="dispositionaction"]) .custom-item-body > .flex-grid > .form-group.row > .custom-field:has(textarea) { flex-basis: 100% !important; max-width: 100% !important; width: 100% !important; }
     /* ---------- Improver Options window ---------- */
-    #pd9-options {
+    .pd9-overlay {
       position: fixed; inset: 0; z-index: 100000; display: flex; align-items: center; justify-content: center;
       background: rgba(0, 0, 0, .45); padding: 16px;
     }
-    #pd9-options .pd9-dialog {
+    .pd9-overlay .pd9-dialog {
       width: min(860px, 100%); max-height: min(640px, 100%); display: flex; flex-direction: column;
       background: var(--t-color-surface, #fff); color: var(--t-color-text, #1f2933);
       border-radius: 8px; box-shadow: 0 12px 40px rgba(0, 0, 0, .3); font: inherit; font-size: 14px; overflow: hidden;
     }
-    #pd9-options .pd9-head { display: flex; align-items: center; padding: 16px 20px; border-bottom: 1px solid var(--t-color-border, #dfe3e8); }
-    #pd9-options h2 { margin: 0; font-size: 18px; font-weight: 600; flex: 1; }
-    #pd9-options .pd9-x { border: 0; background: none; cursor: pointer; color: inherit; padding: 4px; border-radius: 4px; display: flex; }
-    #pd9-options .pd9-x:hover { background: var(--t-color-object-1-secondary, #eef2f7); }
-    #pd9-options .pd9-body { display: flex; min-height: 0; flex: 1; }
-    #pd9-options .pd9-side { width: 220px; border-right: 1px solid var(--t-color-border, #dfe3e8); padding: 14px; display: flex; flex-direction: column; gap: 8px; overflow: auto; }
-    #pd9-options .pd9-section { font-size: 12px; font-weight: 600; opacity: .7; }
-    #pd9-options .pd9-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
-    #pd9-options .pd9-list li { padding: 8px 10px; border-radius: 6px; cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    #pd9-options .pd9-list li:hover { background: var(--t-color-object-1-secondary, #eef2f7); }
-    #pd9-options .pd9-list li[aria-selected="true"] { background: var(--t-color-object-1-secondary, #e3ecfb); font-weight: 600; }
-    #pd9-options .pd9-form { flex: 1; padding: 14px 20px 22px; display: flex; flex-direction: column; gap: 12px; overflow: auto; }
-    #pd9-options label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; font-weight: 600; }
-    #pd9-options input, #pd9-options textarea {
+    .pd9-overlay .pd9-head { display: flex; align-items: center; padding: 16px 20px; border-bottom: 1px solid var(--t-color-border, #dfe3e8); }
+    .pd9-overlay h2 { margin: 0; font-size: 18px; font-weight: 600; flex: 1; }
+    .pd9-overlay .pd9-x { border: 0; background: none; cursor: pointer; color: inherit; padding: 4px; border-radius: 4px; display: flex; }
+    .pd9-overlay .pd9-x:hover { background: var(--t-color-object-1-secondary, #eef2f7); }
+    .pd9-overlay .pd9-body { display: flex; min-height: 0; flex: 1; }
+    .pd9-overlay .pd9-side { width: 220px; border-right: 1px solid var(--t-color-border, #dfe3e8); padding: 14px; display: flex; flex-direction: column; gap: 8px; overflow: auto; }
+    .pd9-overlay .pd9-section { font-size: 12px; font-weight: 600; opacity: .7; }
+    .pd9-overlay .pd9-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+    .pd9-overlay .pd9-list li { padding: 8px 10px; border-radius: 6px; cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .pd9-overlay .pd9-list li:hover { background: var(--t-color-object-1-secondary, #eef2f7); }
+    .pd9-overlay .pd9-list li[aria-selected="true"] { background: var(--t-color-object-1-secondary, #e3ecfb); font-weight: 600; }
+    .pd9-overlay .pd9-form { flex: 1; padding: 14px 20px 22px; display: flex; flex-direction: column; gap: 12px; overflow: auto; }
+    .pd9-overlay label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; font-weight: 600; }
+    .pd9-overlay input, .pd9-overlay textarea {
       font: inherit; font-size: 14px; font-weight: 400; color: inherit; background: var(--t-color-surface, #fff);
       border: 1px solid var(--t-color-border, #c9ced6); border-radius: 4px; padding: 8px 10px; width: 100%; box-sizing: border-box;
     }
-    #pd9-options textarea { resize: vertical; font-family: inherit; line-height: 1.5; }
-    #pd9-options input:focus, #pd9-options textarea:focus { outline: 2px solid var(--t-color-focus, #2563eb); outline-offset: -1px; }
-    #pd9-options .pd9-tagwrap { display: flex; align-items: center; gap: 4px; font-weight: 400; }
-    #pd9-options .pd9-help { margin: 0; font-size: 12px; opacity: .75; }
-    #pd9-options code { background: var(--t-color-object-1-secondary, #eef2f7); padding: 1px 4px; border-radius: 3px; }
-    #pd9-options .pd9-row, #pd9-options .pd9-foot { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
-    #pd9-options .pd9-foot { padding: 12px 20px; border-top: 1px solid var(--t-color-border, #dfe3e8); }
-    #pd9-options .pd9-grow { flex: 1; }
-    #pd9-options .pd9-btn {
+    .pd9-overlay textarea { resize: vertical; font-family: inherit; line-height: 1.5; }
+    .pd9-overlay input:focus, .pd9-overlay textarea:focus { outline: 2px solid var(--t-color-focus, #2563eb); outline-offset: -1px; }
+    .pd9-overlay .pd9-tagwrap { display: flex; align-items: center; gap: 4px; font-weight: 400; }
+    .pd9-overlay .pd9-help { margin: 0; font-size: 12px; opacity: .75; }
+    .pd9-overlay code { background: var(--t-color-object-1-secondary, #eef2f7); padding: 1px 4px; border-radius: 3px; }
+    .pd9-overlay .pd9-row, .pd9-overlay .pd9-foot { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+    .pd9-overlay .pd9-foot { padding: 12px 20px; border-top: 1px solid var(--t-color-border, #dfe3e8); }
+    .pd9-overlay .pd9-grow { flex: 1; }
+    .pd9-overlay .pd9-btn {
       font: inherit; font-size: 13px; font-weight: 600; padding: 8px 14px; border-radius: 4px; cursor: pointer;
       border: 1px solid var(--t-color-border, #c9ced6); background: var(--t-color-surface, #fff); color: inherit;
     }
-    #pd9-options .pd9-btn:hover:not(:disabled) { background: var(--t-color-object-1-secondary, #eef2f7); }
-    #pd9-options .pd9-btn:disabled { opacity: .45; cursor: default; }
-    #pd9-options .pd9-btn:focus-visible, #pd9-options .pd9-list li:focus-visible { outline: 2px solid var(--t-color-focus, #2563eb); outline-offset: 2px; }
-    #pd9-options .pd9-primary { background: #1f2933; border-color: #1f2933; color: #fff; }
-    #pd9-options .pd9-primary:hover:not(:disabled) { background: #000; }
-    #pd9-options .pd9-del { color: #b42318; }
+    .pd9-overlay .pd9-btn:hover:not(:disabled) { background: var(--t-color-object-1-secondary, #eef2f7); }
+    .pd9-overlay .pd9-btn:disabled { opacity: .45; cursor: default; }
+    .pd9-overlay .pd9-btn:focus-visible, .pd9-overlay .pd9-list li:focus-visible { outline: 2px solid var(--t-color-focus, #2563eb); outline-offset: 2px; }
+    .pd9-overlay .pd9-primary { background: #1f2933; border-color: #1f2933; color: #fff; }
+    .pd9-overlay .pd9-primary:hover:not(:disabled) { background: #000; }
+    .pd9-overlay .pd9-del { color: #b42318; }
     @media (max-width: 640px) {
-      #pd9-options .pd9-body { flex-direction: column; }
-      #pd9-options .pd9-side { width: auto; border-right: 0; border-bottom: 1px solid var(--t-color-border, #dfe3e8); }
+      .pd9-overlay .pd9-body { flex-direction: column; }
+      .pd9-overlay .pd9-side { width: auto; border-right: 0; border-bottom: 1px solid var(--t-color-border, #dfe3e8); }
+    }
+    /* Improved Close */
+    .pd9-hint { font-size: 12px; line-height: 1.35; opacity: .72; margin: -2px 0 4px; }
+    .pd9-overlay .pd9-small { width: min(460px, 100%); }
+    .pd9-flash { outline: 3px solid #e8590c !important; outline-offset: 4px; border-radius: 6px; transition: outline-color .3s; }
+    .pd9-panel {
+      position: fixed; right: 20px; bottom: 20px; z-index: 100000; width: min(380px, calc(100vw - 40px));
+      background: var(--t-color-surface, #fff); color: var(--t-color-text, #1f2933); font: inherit; font-size: 14px;
+      border-radius: 8px; box-shadow: 0 12px 40px rgba(0, 0, 0, .3); padding: 16px 18px; border-top: 4px solid #e8590c;
+    }
+    .pd9-panel h3 { margin: 0 0 8px; font-size: 16px; font-weight: 600; }
+    .pd9-panel ul { margin: 0 0 14px; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 6px; }
+    .pd9-panel li.pd9-warn { color: #b42318; }
+    .pd9-panel-btns { display: flex; justify-content: flex-end; gap: 8px; }
+    .pd9-panel .pd9-btn {
+      font: inherit; font-size: 13px; font-weight: 600; padding: 8px 14px; border-radius: 4px; cursor: pointer;
+      border: 1px solid var(--t-color-border, #c9ced6); background: var(--t-color-surface, #fff); color: inherit;
+    }
+    .pd9-panel .pd9-primary { background: #1f2933; border-color: #1f2933; color: #fff; }
+    .pd9-panel .pd9-btn:disabled { opacity: .6; cursor: default; }
+    /* Find (search helper) */
+    #pd9-find-btn, #pd9-case-btn {
+      display: inline-flex; align-items: center; gap: 6px; margin-left: 8px; padding: 6px 10px; cursor: pointer;
+      font: inherit; font-size: 13px; font-weight: 600; color: #fff; background: transparent;
+      border: 1px solid rgba(255, 255, 255, .55); border-radius: 4px; white-space: nowrap; align-self: center;
+    }
+    #pd9-find-btn:hover, #pd9-case-btn:hover { background: rgba(255, 255, 255, .12); }
+    #pd9-find-btn:focus-visible, #pd9-case-btn:focus-visible { outline: 2px solid #fff; outline-offset: 2px; }
+    #pd9-find, #pd9-case {
+      position: fixed; z-index: 100000; width: 330px; padding: 14px; font: inherit; font-size: 13px;
+      background: var(--t-color-surface, #fff); color: var(--t-color-text, #1f2933);
+      border-radius: 8px; box-shadow: 0 12px 40px rgba(0, 0, 0, .3);
+    }
+    #pd9-find .pd9-find-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 12px; }
+    #pd9-find .pd9-span2 { grid-column: 1 / -1; }
+    #pd9-case label, #pd9-find label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; font-weight: 600; }
+    #pd9-find input, #pd9-case input {
+      font: inherit; font-size: 14px; font-weight: 400; color: inherit; background: var(--t-color-surface, #fff);
+      border: 1px solid var(--t-color-border, #c9ced6); border-radius: 4px; padding: 7px 9px; width: 100%; box-sizing: border-box;
+    }
+    #pd9-find input:focus, #pd9-case input:focus { outline: 2px solid var(--t-color-focus, #2563eb); outline-offset: -1px; }
+    #pd9-find .pd9-panel-btns, #pd9-case .pd9-panel-btns { display: flex; justify-content: flex-end; gap: 8px; }
+    #pd9-find .pd9-btn, #pd9-case .pd9-btn {
+      font: inherit; font-size: 13px; font-weight: 600; padding: 7px 14px; border-radius: 4px; cursor: pointer;
+      border: 1px solid var(--t-color-border, #c9ced6); background: var(--t-color-surface, #fff); color: inherit;
+    }
+    #pd9-find .pd9-primary, #pd9-case .pd9-primary { background: #1f2933; border-color: #1f2933; color: #fff; }
+    #pd9-case .pd9-case-help { margin: 8px 0 12px; font-size: 12px; line-height: 1.4; opacity: .8; }
+    #pd9-case-banner {
+      position: fixed; top: 70px; left: 50%; transform: translateX(-50%); z-index: 100000;
+      background: #e8590c; color: #fff; padding: 6px 12px; border-radius: 6px; font-size: 13px; font-weight: 600;
+      box-shadow: 0 2px 8px rgba(0, 0, 0, .25); max-width: calc(100vw - 40px);
+    }
+    #pd9-find-badge {
+      position: fixed; z-index: 100000; pointer-events: none; padding: 3px 8px; border-radius: 4px;
+      background: #e8590c; color: #fff; font-size: 12px; font-weight: 600; white-space: nowrap;
     }
     .fvqn-toast {
       position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
