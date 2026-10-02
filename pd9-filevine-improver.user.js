@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PD9 Filevine Improver
 // @namespace    https://filevine.local/pd9-improver
-// @version      3.16.1
+// @version      3.17.0
 // @description  Faster notes, tasks, and case closing in Filevine for PD9.
 // @match        https://*.filevine.com/*
 // @match        https://*.filevineapp.com/*
@@ -1314,19 +1314,35 @@
   const CASE_SEARCH_KEY = 'pd9-case-search';
   const CASE_SEARCH_MAX_MORE = 10; // how many times to press "More" at most
 
-  // The words we hand Filevine's search: just the year and the number, written
-  // the ways case numbers are stored (24 / 2024, 1234 / 001234). Filevine ranks
-  // results with more matching words first, so the right year comes up top.
+  // Court types and defendant letters to try when you don't type them.
+  // Add any type codes your office uses.
+  const CASE_TYPES = ['CF', 'MM', 'CT', 'MO', 'OC', 'DF', 'CJ', 'MH', 'AP'];
+  const CASE_DEFENDANTS = ['A', 'B'];
+  const CASE_COUNTIES = ['OS', 'OR'];
+
+  // Write the case number out every way it can appear in a case title, so
+  // Filevine's search finds the title itself:
+  //   24-CF-001234-A-OS   2024-CF-001234-A-OS   24CF001234AOS   (+ OR, B, each type)
+  // plus the short forms 24-CF-001234 / 2024-CF-001234 / 24CF001234.
   function caseSearchTerms(qs) {
     const terms = new Set();
     for (const q of qs) {
-      terms.add(q.year);
-      terms.add(`20${q.year}`);
-      terms.add(q.num);
-      if (q.num.length < 6) terms.add(q.num.padStart(6, '0'));
+      const num = q.num.length < 6 ? q.num.padStart(6, '0') : q.num; // always 6 digits, zero-filled
+      const years = [q.year, `20${q.year}`];
+      for (const type of q.type ? [q.type] : CASE_TYPES) {
+        for (const y of years) terms.add(`${y}-${type}-${num}`);
+        terms.add(`${q.year}${type}${num}`);
+        for (const def of q.def ? [q.def] : CASE_DEFENDANTS) {
+          for (const county of q.county ? [q.county] : CASE_COUNTIES) {
+            for (const y of years) terms.add(`${y}-${type}-${num}-${def}-${county}`);
+            terms.add(`${q.year}${type}${num}${def}${county}`);
+          }
+        }
+      }
     }
     return [...terms].join(' ');
   }
+
 
   function startCaseSearch(entry) {
     const qs = readCaseQuery(entry);
