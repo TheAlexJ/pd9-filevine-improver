@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PD9 Filevine Improver
 // @namespace    https://filevine.local/pd9-improver
-// @version      3.3.0
+// @version      3.4.3
 // @description  Press N or T in a case for a floating note or task box with templates. Project Hub links open to Activity.
 // @match        https://*.filevine.com/*
 // @match        https://*.filevineapp.com/*
@@ -26,33 +26,34 @@
   // ---------------------------------------------------------------
   const TEMPLATES = [
     {
-      label: 'File Review', subject: 'File Review', tag: 'FILEREVIEW',
+      label: 'Contact', subject: 'Contact', tag: 'CONTACT',
       body: [
-        'Charge: {|}',
-        '',
-        'Summary: ',
-        '',
-        'Pending Cases: ',
-        '',
-        'Jail: ',
-        '',
-        'Conflict: ',
-        '',
-        'Theory of Defense: ',
-        '',
-        'Motions: ',
+        'Date of contact: {date}',
+        'Contact type: {|}',
+        'Contact with: ',
+        'Discussed: ',
+        'Follow-up: ',
       ].join('\n'),
     },
     {
-      label: 'Contact', subject: 'Contact', tag: 'CONTACT',
-      body: 'Date of contact: {date}\nContact type (call, jail, court, office, video): {|}\nWith:\n\nDiscussed:\n\nFollow-up:',
+      label: 'File Review', subject: 'File Review', tag: 'FILEREVIEW',
+      body: [
+        'Charge: {|}',
+        'Summary: ',
+        'Pending Cases: ',
+        'Jail: ',
+        'Conflict: ',
+        'Theory of Defense: ',
+        'Motions: ',
+        'Experts: ',
+      ].join('\n'),
     },
     {
       label: 'Conflict', subject: 'Conflict', tag: 'CONFLICT',
       body: [
-        '(1) Nature of conflict: {|}(Explain conflict basis and provide a brief narrative of facts. Common conflicts are current/prior representation or impeachables of a codefendant/AV/SW. If the conflict is more complicated, you should explain in greater detail.)',
-        '(2) Open cases: (List all open cases for all co-Ds/AVs/SWs, their case numbers, and the current assigned PD on each case).',
-        '(3) Prior representation: (If AV/SW has a prior representation by PD9, list the case numbers and provide the outcomes: i.e. AG/WH, LIO or as charged, etc. of each case you believe is a conflict. If the conflict is between co-defendants, list all recent representation, again including outcomes).',
+        '(1) Nature of conflict: {|}',
+        '(2) Open cases: ',
+        '(3) Prior representation: ',
         '(4) If co-d, who is more culpable: ',
         '(5) If co-d, are either incarcerated: ',
         '(6) Recommendation for conflict and why? ',
@@ -76,8 +77,6 @@
   // Case links in the Project Hub open to this section. Set to null to turn off.
   const HUB_OPENS_TO = 'activity';
 
-  // 'paragraph' acts like pressing Enter. 'linebreak' acts like Shift+Enter.
-  const LINE_MODE = 'paragraph';
 
   // ---------------------------------------------------------------
   // Filevine selectors (data-testid and aria-label are stable)
@@ -210,27 +209,88 @@
     else caretToEnd(box);
   }
 
-  // Type text into the note box one line at a time, like a person would.
-  function fillMessage(box, text) {
-    text = text.replace(/\{date\}/g, today());
-    const markAt = text.indexOf('{|}');
-    const caretChars = markAt < 0 ? -1 : text.slice(0, markAt).replace(/\n/g, '').length;
-    const lines = text.replace('{|}', '').split('\n');
+  // ---------- putting text in the note box ----------
+  // Filevine's editor keeps its own copy of the text and can redraw the box from
+  // it, so some ways of typing get wiped out. We try a few ways, in order, and
+  // check after each one that every line actually landed.
 
+  const escapeHtml = (t) => t.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+  function clearBox(box) {
     box.focus();
     const r = document.createRange();
     r.selectNodeContents(box);
     setCaret(r);
     document.execCommand('delete');
-
-    const breakCmd = LINE_MODE === 'linebreak' ? 'insertLineBreak' : 'insertParagraph';
-    lines.forEach((line, i) => {
-      if (i > 0) document.execCommand(breakCmd);
-      if (line) document.execCommand('insertText', false, line);
-    });
-    if (caretChars >= 0) placeCaretAt(box, caretChars);
-    else caretToEnd(box);
   }
+
+  // True when the box shows every non-empty line, in order, each on its own line.
+  function linesLanded(box, lines) {
+    if (!box || !box.isConnected) return false;
+    // Hashtag lines are skipped: Filevine may turn them into tag chips.
+    const clean = (arr) => arr.map((l) => l.trim()).filter((l) => l && !/^#\S+$/.test(l));
+    const want = clean(lines);
+    const have = clean(box.innerText.replace(/\u00a0/g, ' ').split('\n'));
+    return want.length === have.length && want.every((w, i) => have[i] === w);
+  }
+
+  const FILL_METHODS = [
+    // 1) Paste it, the way Ctrl+V would. Most editors handle paste themselves.
+    function paste(box, text) {
+      const dt = new DataTransfer();
+      dt.setData('text/plain', text);
+      box.dispatchEvent(new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true }));
+    },
+    // 2) Insert it all at once as lines with <br> breaks.
+    function html(box, text) {
+      const htmlText = text.split('\n')
+        .map((l) => escapeHtml(l).replace(/^ | $/g, '&nbsp;').replace(/ {2}/g, ' &nbsp;'))
+        .join('<br>');
+      document.execCommand('insertHTML', false, htmlText);
+    },
+    // 3) Type each line, Shift+Enter between lines.
+    function linebreaks(box, text) {
+      text.split('\n').forEach((line, i) => {
+        if (i > 0) document.execCommand('insertLineBreak');
+        if (line) document.execCommand('insertText', false, line);
+      });
+    },
+    // 4) Type each line, Enter between lines.
+    function paragraphs(box, text) {
+      text.split('\n').forEach((line, i) => {
+        if (i > 0) document.execCommand('insertParagraph');
+        if (line) document.execCommand('insertText', false, line);
+      });
+    },
+  ];
+  let goodMethod = 0; // remember what worked last time and try it first
+
+  async function fillMessage(box, text, liveBox = () => box) {
+    text = text.replace(/\{date\}/g, today());
+    const markAt = text.indexOf('{|}');
+    const caretChars = markAt < 0 ? -1 : text.slice(0, markAt).replace(/\n/g, '').length;
+    text = text.replace('{|}', '');
+    const lines = text.split('\n');
+
+    const order = [goodMethod, ...FILL_METHODS.keys()].filter((v, i, a) => a.indexOf(v) === i);
+    for (const m of order) {
+      const target = liveBox();
+      if (!target) return false;
+      clearBox(target);
+      FILL_METHODS[m](target, text);
+      await sleep(150); // give Filevine a moment to redraw
+      const now = liveBox();
+      if (linesLanded(now, lines)) {
+        goodMethod = m;
+        now.focus();
+        if (caretChars >= 0) placeCaretAt(now, caretChars);
+        else caretToEnd(now);
+        return true;
+      }
+    }
+    return false;
+  }
+
 
   // Make sure "Note" is the selected activity type.
   // Activity types in the composer header, by their icon name.
@@ -463,24 +523,37 @@
 
   // ---------- templates ----------
   async function useTemplate(form, tpl) {
-    const box = $(SEL.message, form);
-    const subj = $(SEL.subject, form);
-    if (!box) return;
-    const dirty = box.textContent.trim() || (subj && subj.value.trim());
+    // Filevine can redraw the note box (for example after tags change), which
+    // leaves us holding an old, detached copy. Always grab the live one.
+    const liveBox = () => $(SEL.message, form);
+    const box0 = liveBox();
+    const subj0 = $(SEL.subject, form);
+    if (!box0) return;
+    const dirty = box0.textContent.trim() || (subj0 && subj0.value.trim());
     if (dirty && !confirm('Replace what is already in the note box?')) return;
-    if (subj) setInputValue(subj, tpl.subject);
+
     // Two blank lines, then the hashtag. The space after it closes the tag
     // suggestion list. Then the cursor jumps back to the {|} spot.
     const body = tpl.tag ? `${tpl.body}\n\n\n#${tpl.tag.replace(/^#/, '')} ` : tpl.body;
+
     await clearOtherTemplateTags(form, tpl.tag);
-    fillMessage(box, body);
+    const subj = $(SEL.subject, form);
+    if (subj) setInputValue(subj, tpl.subject);
+    await sleep(50); // let Filevine settle after the subject change
+
+    // Fill, then check it landed. If Filevine redrew the box, fill the new one.
+    const landed = await fillMessage(liveBox(), body, liveBox);
+    if (!landed) toast('The template did not load. Click in the message box, then try the button again.');
+
     // Filevine may turn the old hashtag into a chip a moment later, so check again.
-    await sleep(300);
-    const caret = lastRange.get(box);
+    await sleep(150);
+    const box = liveBox();
+    const caret = box && lastRange.get(box);
     await clearOtherTemplateTags(form, tpl.tag);
-    if (caret && document.activeElement !== box) { box.focus(); setCaret(caret); }
+    if (box && caret && document.activeElement !== box) { box.focus(); setCaret(caret); }
     saveDraft(form);
   }
+
 
   function buildBar(form) {
     const wrap = document.createElement('div');
@@ -505,7 +578,7 @@
       b.type = 'button';
       b.className = 'fvqn-chip';
       b.textContent = tpl.label;
-      b.addEventListener('click', () => useTemplate(form, tpl));
+      b.addEventListener('click', () => useTemplate(composerOf(b) || form, tpl));
       bar.appendChild(b);
     }
     const hint = document.createElement('span');
@@ -633,7 +706,7 @@
     if ((now.body.trim() || now.subject.trim()) && !confirm('Replace what is in the box with your saved note?')) return;
     const subj = $(SEL.subject, form);
     if (subj) setInputValue(subj, d.subject || '');
-    fillMessage(box, (d.body || '').replace(/\{(date|\|)\}/g, '')); // treat saved text as plain text
+    await fillMessage(box, (d.body || '').replace(/\{(date|\|)\}/g, ''), () => $(SEL.message, form)); // saved text is plain text
   }
 
   function clearDraftAfterSave(form) {
@@ -757,6 +830,22 @@
     requestAnimationFrame(() => { pending = false; decorate(); });
   }).observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['href'] });
   pruneDrafts();
+
+  // Print the version to the console. Filevine mutes console.log on its page,
+  // so borrow a clean console from a hidden blank frame.
+  (function printVersion() {
+    const version = typeof GM_info !== 'undefined' ? GM_info.script.version : '?';
+    let out = console;
+    try {
+      const frame = document.createElement('iframe');
+      frame.style.display = 'none';
+      frame.setAttribute('aria-hidden', 'true');
+      document.documentElement.appendChild(frame);
+      if (frame.contentWindow && frame.contentWindow.console) out = frame.contentWindow.console;
+    } catch (e) { /* fall back to the page console */ }
+    out.info(`%cPD9 Filevine Improver v${version} loaded`, 'color:#2563eb;font-weight:bold');
+  })();
+
   window.addEventListener('hashchange', decorate);
   window.addEventListener('popstate', decorate);
   decorate();
