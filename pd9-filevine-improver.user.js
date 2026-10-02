@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PD9 Filevine Improver
 // @namespace    https://filevine.local/pd9-improver
-// @version      3.4.3
+// @version      3.6.0
 // @description  Press N or T in a case for a floating note or task box with templates. Project Hub links open to Activity.
 // @match        https://*.filevine.com/*
 // @match        https://*.filevineapp.com/*
@@ -11,20 +11,24 @@
 // @updateURL    https://raw.githubusercontent.com/TheAlexJ/pd9-filevine-improver/main/pd9-filevine-improver.user.js
 // @downloadURL  https://raw.githubusercontent.com/TheAlexJ/pd9-filevine-improver/main/pd9-filevine-improver.user.js
 // @run-at       document-idle
-// @grant        none
+// @grant        GM_getValue
+// @grant        GM_setValue
 // ==/UserScript==
 
 (function () {
   'use strict';
 
   // ---------------------------------------------------------------
-  // TEMPLATES. Edit these freely.
+  // DEFAULT TEMPLATES. Everyone starts with these. Each person can change
+  // their own copy from the account menu: click your initials, then
+  // "Improver Options". Once someone saves their own, these defaults no
+  // longer apply to them (until they click "Reset to defaults").
   // "subject" goes in the Subject box. "body" goes in the Message box.
   // {date} becomes today's date, like 10/2/2026. Change it if the contact was earlier.
   // {|} is where the cursor lands. Leave it out to land at the end.
   // "tag" is added as a hashtag at the bottom of the note, after 2 blank lines.
   // ---------------------------------------------------------------
-  const TEMPLATES = [
+  const DEFAULT_TEMPLATES = [
     {
       label: 'Contact', subject: 'Contact', tag: 'CONTACT',
       body: [
@@ -60,6 +64,29 @@
       ].join('\n'),
     },
   ];
+
+  // ---------- saved settings (per person, kept by Tampermonkey) ----------
+  const store = {
+    get(key, fallback) {
+      try { if (typeof GM_getValue === 'function') return GM_getValue(key, fallback); } catch (e) { /* use localStorage */ }
+      try { const v = localStorage.getItem(key); return v == null ? fallback : JSON.parse(v); } catch (e) { return fallback; }
+    },
+    set(key, value) {
+      try { if (typeof GM_setValue === 'function') { GM_setValue(key, value); return; } } catch (e) { /* use localStorage */ }
+      try { localStorage.setItem(key, JSON.stringify(value)); } catch (e) { /* ignore */ }
+    },
+  };
+  const TEMPLATES_KEY = 'pd9-templates';
+  const newId = () => `t${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+  const cleanTag = (t) => (t || '').trim().replace(/^#+/, '').replace(/\s+/g, '');
+
+  function loadTemplates() {
+    const saved = store.get(TEMPLATES_KEY, null);
+    const list = Array.isArray(saved) && saved.length ? saved : DEFAULT_TEMPLATES;
+    return list.map((t) => ({ id: t.id || newId(), label: t.label || 'Untitled', subject: t.subject || '', tag: cleanTag(t.tag), body: t.body || '' }));
+  }
+  let TEMPLATES = loadTemplates();
+
 
   // Hotkeys (no modifiers, only inside a case, never while typing)
   const HOTKEYS = {
@@ -119,6 +146,7 @@
   }
 
   function toast(msg) {
+    $$('.fvqn-toast').forEach((old) => old.remove()); // one message at a time
     const t = document.createElement('div');
     t.className = 'fvqn-toast';
     t.textContent = msg;
@@ -402,7 +430,7 @@
 
 
   // ---------- clear old template tags from the Tags box ----------
-  const TEMPLATE_TAGS = [...new Set(TEMPLATES.map((t) => t.tag).filter(Boolean))];
+  const templateTags = () => [...new Set(TEMPLATES.map((t) => t.tag).filter(Boolean))];
 
   // Remove chips for template tags other than "keep" (for example, CONFLICT
   // when you switch to a Contact template). Tags you add by hand stay.
@@ -410,7 +438,7 @@
     for (let pass = 0; pass < 5; pass++) {
       const extra = $$(SEL.tagChip, form).filter((chip) => {
         const name = norm(chip.getAttribute('data-testid').slice('tag-chip-'.length));
-        return name !== norm(keep) && TEMPLATE_TAGS.some((t) => norm(t) === name);
+        return name !== norm(keep) && templateTags().some((t) => norm(t) === name);
       });
       if (!extra.length) return;
       for (const chip of extra) {
@@ -626,8 +654,221 @@
     }
   }
 
+  // ---------- "Improver Options" in the account menu ----------
+  // Filevine draws the account menu only when it opens. When it does, we copy
+  // its "Filevine Settings" item (so the look matches) and add ours below it.
+  function addOptionsMenuItem() {
+    // XPath is a fast, built-in text search, so this stays cheap while you type.
+    const hit = document.evaluate("//body//*[not(*)][normalize-space(.)='Filevine Settings']",
+      document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue;
+    const label = hit && isVisible(hit) ? hit : null;
+    if (!label) return;
+    // Climb to the menu item: the highest parent that does not also hold "Logout".
+    let item = label;
+    while (item.parentElement && !/Logout/.test(item.parentElement.textContent)) item = item.parentElement;
+    if (!item.parentElement || item.parentElement.querySelector('[data-pd9-options]')) return;
+
+    const mine = item.cloneNode(true);
+    mine.setAttribute('data-pd9-options', '');
+    for (const el of [mine, ...mine.querySelectorAll('*')]) {
+      el.removeAttribute('id');
+      el.removeAttribute('href');
+      el.removeAttribute('data-testid');
+      if (el.childElementCount === 0 && el.textContent.trim() === 'Filevine Settings') el.textContent = 'Improver Options';
+    }
+    mine.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const trigger = $('.fvs-global-avatar-menu-trigger');
+      if (trigger) trigger.click(); // close Filevine's menu
+      openOptions();
+    }, true);
+    item.after(mine);
+  }
+
+  const escapeAttr = (t) => String(t).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;');
+
+  function openOptions() {
+    if (document.getElementById('pd9-options')) return;
+    let list = TEMPLATES.map((t) => ({ ...t })); // working copy until Save
+    let sel = 0;
+    let dirty = false;
+
+    const overlay = document.createElement('div');
+    overlay.id = 'pd9-options';
+    overlay.innerHTML = `
+      <div class="pd9-dialog" role="dialog" aria-modal="true" aria-labelledby="pd9-title">
+        <div class="pd9-head">
+          <h2 id="pd9-title">Improver Options</h2>
+          <button type="button" class="pd9-x" aria-label="Close">
+            <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+          </button>
+        </div>
+        <div class="pd9-body">
+          <div class="pd9-side">
+            <div class="pd9-section">Templates</div>
+            <ul class="pd9-list" role="listbox" aria-label="Templates"></ul>
+            <button type="button" class="pd9-btn pd9-add">+ New template</button>
+          </div>
+          <div class="pd9-form">
+            <label>Button name<input type="text" name="label" maxlength="40"></label>
+            <label>Subject<input type="text" name="subject" maxlength="200"></label>
+            <label>Tag<span class="pd9-tagwrap"><span>#</span><input type="text" name="tag" maxlength="60" placeholder="CONTACT"></span></label>
+            <label>Note text<textarea name="body" rows="10"></textarea></label>
+            <p class="pd9-help">Type <code>{date}</code> for today's date and <code>{|}</code> where the cursor should start. Leave Tag empty for no tag.</p>
+            <div class="pd9-row">
+              <button type="button" class="pd9-btn pd9-up" title="Move up">Move up</button>
+              <button type="button" class="pd9-btn pd9-down" title="Move down">Move down</button>
+              <button type="button" class="pd9-btn pd9-del">Delete</button>
+            </div>
+          </div>
+        </div>
+        <div class="pd9-foot">
+          <button type="button" class="pd9-btn pd9-reset">Reset to defaults</button>
+          <button type="button" class="pd9-btn pd9-export" title="Save your templates to a file">Export</button>
+          <button type="button" class="pd9-btn pd9-import" title="Add templates from a file">Import</button>
+          <input type="file" class="pd9-file" accept=".json,application/json" hidden>
+          <span class="pd9-grow"></span>
+          <button type="button" class="pd9-btn pd9-cancel">Cancel</button>
+          <button type="button" class="pd9-btn pd9-primary pd9-save">Save</button>
+        </div>
+      </div>`;
+    document.body.appendChild(overlay);
+
+    const q = (s) => overlay.querySelector(s);
+    const ul = q('.pd9-list');
+    const f = { label: q('[name=label]'), subject: q('[name=subject]'), tag: q('[name=tag]'), body: q('[name=body]') };
+
+    function drawList() {
+      ul.innerHTML = list.map((t, i) =>
+        `<li role="option" tabindex="0" data-i="${i}" aria-selected="${i === sel}">${escapeAttr(t.label || 'Untitled')}</li>`).join('');
+      const empty = !list.length;
+      Object.values(f).forEach((el) => { el.disabled = empty; });
+      ['.pd9-up', '.pd9-down', '.pd9-del'].forEach((s) => { q(s).disabled = empty; });
+      if (!empty) {
+        q('.pd9-up').disabled = sel === 0;
+        q('.pd9-down').disabled = sel === list.length - 1;
+      }
+    }
+    function drawForm() {
+      const t = list[sel] || { label: '', subject: '', tag: '', body: '' };
+      f.label.value = t.label; f.subject.value = t.subject; f.tag.value = t.tag; f.body.value = t.body;
+    }
+    function redraw() { drawList(); drawForm(); }
+
+    for (const [key, el] of Object.entries(f)) {
+      el.addEventListener('input', () => {
+        if (!list[sel]) return;
+        list[sel][key] = key === 'tag' ? cleanTag(el.value) : el.value;
+        dirty = true;
+        if (key === 'label') drawList();
+      });
+    }
+    ul.addEventListener('click', (e) => {
+      const li = e.target.closest('li[data-i]');
+      if (li) { sel = +li.dataset.i; redraw(); }
+    });
+    ul.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') { const li = e.target.closest('li[data-i]'); if (li) { e.preventDefault(); sel = +li.dataset.i; redraw(); } }
+    });
+    q('.pd9-add').addEventListener('click', () => {
+      list.push({ id: newId(), label: 'New template', subject: '', tag: '', body: '' });
+      sel = list.length - 1; dirty = true; redraw(); f.label.select();
+    });
+    q('.pd9-del').addEventListener('click', () => {
+      if (!list[sel] || !confirm(`Delete the "${list[sel].label}" template?`)) return;
+      list.splice(sel, 1); sel = Math.max(0, sel - 1); dirty = true; redraw();
+    });
+    const move = (d) => {
+      const j = sel + d;
+      if (j < 0 || j >= list.length) return;
+      [list[sel], list[j]] = [list[j], list[sel]]; sel = j; dirty = true; redraw();
+    };
+    q('.pd9-up').addEventListener('click', () => move(-1));
+    q('.pd9-down').addEventListener('click', () => move(1));
+    q('.pd9-reset').addEventListener('click', () => {
+      if (!confirm('Replace your templates with the office defaults?')) return;
+      list = DEFAULT_TEMPLATES.map((t) => ({ ...t, id: newId() })); sel = 0; dirty = true; redraw();
+    });
+
+    // Export: download the templates in this window as a .json file.
+    q('.pd9-export').addEventListener('click', () => {
+      const data = { app: 'pd9-filevine-improver', exported: new Date().toISOString(),
+        templates: list.map(({ label, subject, tag, body }) => ({ label, subject, tag, body })) };
+      const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      const d = new Date();
+      a.download = `pd9-templates-${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}.json`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+      toast(`Exported ${list.length} template${list.length === 1 ? '' : 's'}.`);
+    });
+
+    // Import: add templates from a file to this list. Nothing is replaced, and
+    // nothing is kept until you click Save. Exact duplicates are skipped.
+    const fileInput = q('.pd9-file');
+    q('.pd9-import').addEventListener('click', () => { fileInput.value = ''; fileInput.click(); });
+    fileInput.addEventListener('change', async () => {
+      const file = fileInput.files && fileInput.files[0];
+      if (!file) return;
+      try {
+        if (file.size > 1e6) throw new Error('too big');
+        const parsed = JSON.parse(await file.text());
+        const items = Array.isArray(parsed) ? parsed : parsed && parsed.templates;
+        if (!Array.isArray(items)) throw new Error('no templates');
+        const text = (v, max) => (typeof v === 'string' ? v : '').slice(0, max);
+        const same = (x, y) => x.label === y.label && x.subject === y.subject && x.tag === y.tag && x.body === y.body;
+        let added = 0, skipped = 0;
+        for (const raw of items.slice(0, 100)) {
+          const t = { id: newId(), label: text(raw && raw.label, 40).trim(), subject: text(raw && raw.subject, 200),
+            tag: cleanTag(text(raw && raw.tag, 60)), body: text(raw && raw.body, 20000) };
+          if (!t.label) { skipped++; continue; }
+          if (list.some((x) => same(x, t))) { skipped++; continue; }
+          list.push(t); added++;
+        }
+        if (added) { sel = list.length - added; dirty = true; redraw(); }
+        toast(added
+          ? `Added ${added} template${added === 1 ? '' : 's'}${skipped ? ` (${skipped} skipped)` : ''}. Click Save to keep them.`
+          : 'Nothing new to add from that file.');
+      } catch (err) {
+        toast('That file is not a PD9 templates export.');
+      }
+    });
+
+    function close(force) {
+      if (!force && dirty && !confirm('Close without saving your changes?')) return;
+      overlay.remove();
+      document.removeEventListener('keydown', onKey, true);
+    }
+    function onKey(e) {
+      if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); close(false); }
+    }
+    document.addEventListener('keydown', onKey, true);
+    q('.pd9-x').addEventListener('click', () => close(false));
+    q('.pd9-cancel').addEventListener('click', () => close(false));
+    overlay.addEventListener('mousedown', (e) => { if (e.target === overlay) close(false); });
+
+    q('.pd9-save').addEventListener('click', () => {
+      const bad = list.findIndex((t) => !t.label.trim());
+      if (bad >= 0) { sel = bad; redraw(); f.label.focus(); toast('Every template needs a button name.'); return; }
+      TEMPLATES = list.map((t) => ({ ...t, label: t.label.trim(), tag: cleanTag(t.tag) }));
+      store.set(TEMPLATES_KEY, TEMPLATES);
+      $$('.fvqn-wrap').forEach((w) => w.remove()); // rebuild the template rows
+      decorate();
+      toast('Templates saved.');
+      close(true);
+    });
+
+    redraw();
+    f.label.focus();
+  }
+
   function decorate() {
     watchProject();
+    addOptionsMenuItem();
     rewriteHubLinks();
     for (const form of $$(COMPOSERS)) {
       const layout = $(SEL.layout, form);
@@ -785,7 +1026,7 @@
     const type = HOTKEYS[e.key.toLowerCase()];
     if (!type) return;
     if (e.ctrlKey || e.metaKey || e.altKey || e.shiftKey || e.repeat || e.isComposing) return;
-    if (!inCase() || isTyping(e)) return;
+    if (!inCase() || isTyping(e) || document.getElementById('pd9-options')) return;
     e.preventDefault();
     openFloating(type);
   }, true);
@@ -814,10 +1055,59 @@
     .fvqn-warn[hidden], .fvqn-bar[hidden], .fvqn-restore[hidden] { display: none !important; }
     /* Hide the Trending Tags box above the feed */
     .top-tags-note-filter { display: none !important; }
+    /* ---------- Improver Options window ---------- */
+    #pd9-options {
+      position: fixed; inset: 0; z-index: 100000; display: flex; align-items: center; justify-content: center;
+      background: rgba(0, 0, 0, .45); padding: 16px;
+    }
+    #pd9-options .pd9-dialog {
+      width: min(860px, 100%); max-height: min(640px, 100%); display: flex; flex-direction: column;
+      background: var(--t-color-surface, #fff); color: var(--t-color-text, #1f2933);
+      border-radius: 8px; box-shadow: 0 12px 40px rgba(0, 0, 0, .3); font: inherit; font-size: 14px; overflow: hidden;
+    }
+    #pd9-options .pd9-head { display: flex; align-items: center; padding: 16px 20px; border-bottom: 1px solid var(--t-color-border, #dfe3e8); }
+    #pd9-options h2 { margin: 0; font-size: 18px; font-weight: 600; flex: 1; }
+    #pd9-options .pd9-x { border: 0; background: none; cursor: pointer; color: inherit; padding: 4px; border-radius: 4px; display: flex; }
+    #pd9-options .pd9-x:hover { background: var(--t-color-object-1-secondary, #eef2f7); }
+    #pd9-options .pd9-body { display: flex; min-height: 0; flex: 1; }
+    #pd9-options .pd9-side { width: 220px; border-right: 1px solid var(--t-color-border, #dfe3e8); padding: 14px; display: flex; flex-direction: column; gap: 8px; overflow: auto; }
+    #pd9-options .pd9-section { font-size: 12px; font-weight: 600; opacity: .7; }
+    #pd9-options .pd9-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+    #pd9-options .pd9-list li { padding: 8px 10px; border-radius: 6px; cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    #pd9-options .pd9-list li:hover { background: var(--t-color-object-1-secondary, #eef2f7); }
+    #pd9-options .pd9-list li[aria-selected="true"] { background: var(--t-color-object-1-secondary, #e3ecfb); font-weight: 600; }
+    #pd9-options .pd9-form { flex: 1; padding: 14px 20px 22px; display: flex; flex-direction: column; gap: 12px; overflow: auto; }
+    #pd9-options label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; font-weight: 600; }
+    #pd9-options input, #pd9-options textarea {
+      font: inherit; font-size: 14px; font-weight: 400; color: inherit; background: var(--t-color-surface, #fff);
+      border: 1px solid var(--t-color-border, #c9ced6); border-radius: 4px; padding: 8px 10px; width: 100%; box-sizing: border-box;
+    }
+    #pd9-options textarea { resize: vertical; font-family: inherit; line-height: 1.5; }
+    #pd9-options input:focus, #pd9-options textarea:focus { outline: 2px solid var(--t-color-focus, #2563eb); outline-offset: -1px; }
+    #pd9-options .pd9-tagwrap { display: flex; align-items: center; gap: 4px; font-weight: 400; }
+    #pd9-options .pd9-help { margin: 0; font-size: 12px; opacity: .75; }
+    #pd9-options code { background: var(--t-color-object-1-secondary, #eef2f7); padding: 1px 4px; border-radius: 3px; }
+    #pd9-options .pd9-row, #pd9-options .pd9-foot { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+    #pd9-options .pd9-foot { padding: 12px 20px; border-top: 1px solid var(--t-color-border, #dfe3e8); }
+    #pd9-options .pd9-grow { flex: 1; }
+    #pd9-options .pd9-btn {
+      font: inherit; font-size: 13px; font-weight: 600; padding: 8px 14px; border-radius: 4px; cursor: pointer;
+      border: 1px solid var(--t-color-border, #c9ced6); background: var(--t-color-surface, #fff); color: inherit;
+    }
+    #pd9-options .pd9-btn:hover:not(:disabled) { background: var(--t-color-object-1-secondary, #eef2f7); }
+    #pd9-options .pd9-btn:disabled { opacity: .45; cursor: default; }
+    #pd9-options .pd9-btn:focus-visible, #pd9-options .pd9-list li:focus-visible { outline: 2px solid var(--t-color-focus, #2563eb); outline-offset: 2px; }
+    #pd9-options .pd9-primary { background: #1f2933; border-color: #1f2933; color: #fff; }
+    #pd9-options .pd9-primary:hover:not(:disabled) { background: #000; }
+    #pd9-options .pd9-del { color: #b42318; }
+    @media (max-width: 640px) {
+      #pd9-options .pd9-body { flex-direction: column; }
+      #pd9-options .pd9-side { width: auto; border-right: 0; border-bottom: 1px solid var(--t-color-border, #dfe3e8); }
+    }
     .fvqn-toast {
       position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
       background: #1f2933; color: #fff; padding: 8px 14px; border-radius: 6px;
-      font-size: 13px; z-index: 99999;
+      font-size: 13px; z-index: 100001;
     }
   `;
   document.head.appendChild(style);
