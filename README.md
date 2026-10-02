@@ -2,7 +2,7 @@
 
 Makes notes and tasks in Filevine faster. Setup takes about 3 minutes and you only do it once.
 
-### [➜ Click here to install](https://raw.githubusercontent.com/YOUR-GITHUB-USERNAME/pd9-filevine-improver/main/pd9-filevine-improver.user.js)
+### [➜ Click here to install](https://raw.githubusercontent.com/TheAlexJ/pd9-filevine-improver/main/pd9-filevine-improver.user.js)
 
 Do Steps 1 and 2 below first, or the link will just show a page of code.
 
@@ -46,7 +46,7 @@ Don't see that switch? Your Chrome is older. Turn on **Developer mode** in the t
 
 ### Step 3: Install the script
 
-1. Click the **[install link](https://raw.githubusercontent.com/YOUR-GITHUB-USERNAME/pd9-filevine-improver/main/pd9-filevine-improver.user.js)**.
+1. Click the **[install link](https://raw.githubusercontent.com/TheAlexJ/pd9-filevine-improver/main/pd9-filevine-improver.user.js)**.
 2. A Tampermonkey page opens showing **PD9 Filevine Improver**. Click **Install**.
 
 ![The Install button](docs/images/3-install-script.png)
@@ -72,7 +72,7 @@ Updates install on their own after this. You never need to do it again.
 | The install link shows a page of code | Tampermonkey isn't installed or turned on. Redo Steps 1 and 2, then click the link again. |
 | Template buttons show up twice | An old copy is installed. Click the Tampermonkey icon, open the **Dashboard**, and delete "Filevine Quick Notes". |
 
-Still stuck? [Open an issue](https://github.com/YOUR-GITHUB-USERNAME/pd9-filevine-improver/issues) or ask your coordinator.
+Still stuck? [Open an issue](https://github.com/TheAlexJ/pd9-filevine-improver/issues) or ask your coordinator.
 
 ---
 

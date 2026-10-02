@@ -6,10 +6,10 @@
 // @match        https://*.filevine.com/*
 // @match        https://*.filevineapp.com/*
 // @match        https://*.filevinegov.com/*
-// @homepageURL  https://github.com/YOUR-GITHUB-USERNAME/pd9-filevine-improver
-// @supportURL   https://github.com/YOUR-GITHUB-USERNAME/pd9-filevine-improver/issues
-// @updateURL    https://raw.githubusercontent.com/YOUR-GITHUB-USERNAME/pd9-filevine-improver/main/pd9-filevine-improver.user.js
-// @downloadURL  https://raw.githubusercontent.com/YOUR-GITHUB-USERNAME/pd9-filevine-improver/main/pd9-filevine-improver.user.js
+// @homepageURL  https://github.com/TheAlexJ/pd9-filevine-improver
+// @supportURL   https://github.com/TheAlexJ/pd9-filevine-improver/issues
+// @updateURL    https://raw.githubusercontent.com/TheAlexJ/pd9-filevine-improver/main/pd9-filevine-improver.user.js
+// @downloadURL  https://raw.githubusercontent.com/TheAlexJ/pd9-filevine-improver/main/pd9-filevine-improver.user.js
 // @run-at       document-idle
 // @grant        none
 // ==/UserScript==
