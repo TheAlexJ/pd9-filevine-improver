@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PD9 Filevine Improver
 // @namespace    https://filevine.local/pd9-improver
-// @version      3.2.1
+// @version      3.3.0
 // @description  Press N or T in a case for a floating note or task box with templates. Project Hub links open to Activity.
 // @match        https://*.filevine.com/*
 // @match        https://*.filevineapp.com/*
@@ -25,9 +25,39 @@
   // "tag" is added as a hashtag at the bottom of the note, after 2 blank lines.
   // ---------------------------------------------------------------
   const TEMPLATES = [
-    { label: 'File Review',      subject: 'File Review',      tag: 'FILEREVIEW', body: 'Date reviewed: {date}\nSummary: {|}\n\nPeople Involved:\n\nIssues / To Do:' },
-    { label: 'Contact',          subject: 'Contact',          tag: 'CONTACT',    body: 'Date of contact: {date}\nContact type (call, jail, court, office, video): {|}\nWith:\n\nDiscussed:\n\nFollow-up:' },
-    { label: 'Conflict',         subject: 'Conflict',         tag: 'CONFLICT',   body: 'Date checked: {date}\nNames checked: {|}\nResult:' },
+    {
+      label: 'File Review', subject: 'File Review', tag: 'FILEREVIEW',
+      body: [
+        'Charge: {|}',
+        '',
+        'Summary: ',
+        '',
+        'Pending Cases: ',
+        '',
+        'Jail: ',
+        '',
+        'Conflict: ',
+        '',
+        'Theory of Defense: ',
+        '',
+        'Motions: ',
+      ].join('\n'),
+    },
+    {
+      label: 'Contact', subject: 'Contact', tag: 'CONTACT',
+      body: 'Date of contact: {date}\nContact type (call, jail, court, office, video): {|}\nWith:\n\nDiscussed:\n\nFollow-up:',
+    },
+    {
+      label: 'Conflict', subject: 'Conflict', tag: 'CONFLICT',
+      body: [
+        '(1) Nature of conflict: {|}(Explain conflict basis and provide a brief narrative of facts. Common conflicts are current/prior representation or impeachables of a codefendant/AV/SW. If the conflict is more complicated, you should explain in greater detail.)',
+        '(2) Open cases: (List all open cases for all co-Ds/AVs/SWs, their case numbers, and the current assigned PD on each case).',
+        '(3) Prior representation: (If AV/SW has a prior representation by PD9, list the case numbers and provide the outcomes: i.e. AG/WH, LIO or as charged, etc. of each case you believe is a conflict. If the conflict is between co-defendants, list all recent representation, again including outcomes).',
+        '(4) If co-d, who is more culpable: ',
+        '(5) If co-d, are either incarcerated: ',
+        '(6) Recommendation for conflict and why? ',
+      ].join('\n'),
+    },
   ];
 
   // Hotkeys (no modifiers, only inside a case, never while typing)
