@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PD9 Filevine Improver
 // @namespace    https://filevine.local/pd9-improver
-// @version      3.48.0
+// @version      3.79.0
 // @description  Faster notes, tasks, and case closing in Filevine for PD9.
 // @match        https://*.filevine.com/*
 // @match        https://*.filevineapp.com/*
@@ -17,6 +17,11 @@
 
 (function () {
   'use strict';
+
+  // Inside a case window (Window mode), Filevine runs in a frame. There we keep the
+  // note and task tools but skip the page-level extras (search windows, hub table).
+  const IN_FRAME = (() => { try { return window.top !== window.self; } catch (e) { return true; } })();
+
 
 
   // ---------------------------------------------------------------
@@ -144,7 +149,7 @@
     tagChip:     '[data-testid^="tag-chip-"]',
   };
   const COMPOSERS = `${SEL.docked}, ${SEL.inline}`;
-
+  
   // ---------- small helpers ----------
   const $ = (s, root = document) => root.querySelector(s);
   const $$ = (s, root = document) => [...root.querySelectorAll(s)];
@@ -507,6 +512,7 @@
   window.addEventListener('click', (e) => {
     if (!HUB_OPENS_TO || !onHub()) return;
     if (e.button !== 0 || e.ctrlKey || e.metaKey || e.shiftKey || e.altKey) return; // new tab etc. use the link
+    if (e.target.closest && e.target.closest('#pd9-hub-sorted')) return; // the PD9 table handles its own links
     const hit = hubCaseId(e.target);
     if (!hit) return;
     e.preventDefault();
@@ -625,13 +631,7 @@
       b.type = 'button';
       b.className = 'fvqn-chip';
       b.textContent = tpl.label;
-      if (tpl.hotkey) {
-        b.title = `Shortcut: ${tpl.hotkey}`;
-        const k = document.createElement('span');
-        k.className = 'fvqn-hk';
-        k.textContent = tpl.hotkey;
-        b.appendChild(k);
-      }
+      if (tpl.hotkey) b.title = `Shortcut: ${tpl.hotkey}`; // shows on hover only
       b.addEventListener('click', () => useTemplate(composerOf(b) || form, tpl));
       bar.appendChild(b);
     }
@@ -668,6 +668,7 @@
     const id = projectId();
     if (!id || id === lastProjectId) return; // same case, or not in a case
     lastProjectId = id;
+    rememberRecent(id);
     const form = $(SEL.docked);
     if (!form) return;
     const box = $(SEL.message, form);
@@ -1140,7 +1141,7 @@
   //   24 CF 2415 A OS      24cf2415               2024-CF-2415
   // Parts: year (2 or 4 digits), court type (2 letters), number (up to 7 digits,
   // often zero-padded to 6), defendant letter (optional), county (optional, OR/OS).
-  const CASE_PART_RX = /(?<![a-z0-9])(\d{4}|\d{2})[\s\-_]*([a-z]{2})[\s\-_]*(\d{1,7})(?:[\s\-_]*([a-z])[\s\-_]*([a-z]{2})|[\s\-_]*([a-z]))?(?![a-z0-9])/gi;
+  const CASE_PART_RX = /(?<![a-z0-9])(\d{4}|\d{2})[\s\-_]*([a-z]{2})[\s\-_]*(\d{1,7})(?:[\s\-_]*([a-z])[\s\-_]*([a-z]{1,2})|[\s\-_]*([a-z]))?(?![a-z0-9])/gi; // suffix: -A-OS, AOS, -AO (Orange), or -A
 
   const twoDigitYear = (y) => (y.length === 4 ? y.slice(2) : y);
   const stripZeros = (n) => n.replace(/^0+(?=\d)/, '');
@@ -2341,17 +2342,1730 @@
     holder.before(btn);
   }
 
+  // ---------- Calendar: next event for each case ----------
+  // Filevine's calendar (the same request the main Calendar page uses):
+  //   GET /api/calendar/displayableevents/<from>/<to>?timezoneOffset=<minutes>
+  // Every event is grouped by case, and each case shows its soonest event.
+  const UPCOMING_DAYS = 120;
+
+  const ymd = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  const firstKey = (o, names) => names.find((k) => o && o[k] != null && o[k] !== '');
+  const isDateText = (v) => typeof v === 'string' && /^\d{4}-\d{2}-\d{2}/.test(v);
+
+  // Calendar entries. Filevine's reply looks like:
+  //   data: [ { ownerName, events: [ { title, start, allDay, location, calendarEventType,
+  //                                    projectID, project: { projectName, ... } } ] } ]
+  // (one entry per calendar shown). We take the biggest list of objects that carry a date.
+  function findEvents(json) {
+    let best = [];
+    (function walk(v, depth) {
+      if (!v || typeof v !== 'object' || depth > 6) return;
+      if (Array.isArray(v)) {
+        const rows = v.filter((x) => x && typeof x === 'object' && !Array.isArray(x) && Object.values(x).some(isDateText));
+        if (rows.length > best.length) best = rows;
+        v.forEach((x) => walk(x, depth + 1));
+        return;
+      }
+      Object.values(v).forEach((x) => walk(x, depth + 1));
+    })(json, 0);
+    return best;
+  }
+
+  function readEvent(ev) {
+    const dateKey = firstKey(ev, ['start', 'startDate', 'startDateTime', 'startTime', 'eventDate', 'date', 'dueDate', 'deadlineDate'])
+      || Object.keys(ev).find((k) => isDateText(ev[k]) && !/created|modified|updated|end/i.test(k));
+    const proj = ev.project && typeof ev.project === 'object' ? ev.project : null;
+    const pidKey = Object.keys(ev).find((k) => /^project_?id$/i.test(k) || /^projectid\d*$/i.test(k));
+    const projectId = (pidKey && ev[pidKey]) || (proj && (proj.id || proj.projectId)) || null;
+    const projectName = ev[firstKey(ev, ['projectName', 'projectTitle', 'projectDisplayName'])] || (proj && (proj.name || proj.title || proj.projectName)) || '';
+    const title = ev[firstKey(ev, ['title', 'name', 'subject', 'summary', 'eventTitle', 'eventName', 'description'])] || '';
+    const allDay = !!(ev.allDay || ev.isAllDay || ev.allDayEvent);
+    const raw = dateKey ? String(ev[dateKey]) : '';
+    // A date with no time (or midnight on an all-day event) is shown as a date only.
+    const dateOnly = /^\d{4}-\d{2}-\d{2}$/.test(raw) || (allDay && /T00:00:00/.test(raw));
+    const when = dateOnly ? new Date(`${raw.slice(0, 10)}T00:00:00`) : new Date(raw);
+    return {
+      projectId: projectId ? String(projectId) : null, projectName: htmlToText(projectName), title: htmlToText(title), when, dateOnly,
+      location: htmlToText(ev.location || ''), type: htmlToText(ev.calendarEventType || ''),
+    };
+  }
+
+  // Filevine refuses ranges much over 6 weeks ("Start and end range too broad"),
+  // so ask in 42-day pieces, all at once, and put them together.
+  const UPCOMING_CHUNK_DAYS = 42;
+
+  async function loadUpcoming() {
+    const from = new Date(); from.setHours(0, 0, 0, 0);
+    const chunks = [];
+    for (let start = 0; start < UPCOMING_DAYS; start += UPCOMING_CHUNK_DAYS) {
+      const a = new Date(from); a.setDate(a.getDate() + start);
+      const b = new Date(from); b.setDate(b.getDate() + Math.min(start + UPCOMING_CHUNK_DAYS, UPCOMING_DAYS));
+      chunks.push(`/api/calendar/displayableevents/${ymd(a)}/${ymd(b)}?timezoneOffset=${new Date().getTimezoneOffset()}`);
+    }
+    const replies = await Promise.all(chunks.map(async (url) => {
+      const res = await fetch(url, { credentials: 'include', headers: { Accept: 'application/json' } });
+      if (!res.ok) throw new Error(`status ${res.status}`);
+      const json = await res.json();
+      if (json && json.success === false) throw new Error(json.message || 'calendar error');
+      return json;
+    }));
+    // The same event can show up in two pieces if it sits on the boundary; keep one copy.
+    const seen = new Set();
+    const events = replies.flatMap((j) => findEvents(j)).filter((ev) => {
+      const id = ev.id || ev.eventId || ev.uniqueId || JSON.stringify(ev);
+      if (seen.has(id)) return false;
+      seen.add(id);
+      return true;
+    }).map(readEvent)
+      .filter((e) => e.projectId && !isNaN(e.when) && e.when >= from);
+    // Group by case; keep the soonest event and count the rest.
+    const byCase = new Map();
+    for (const e of events.sort((a, b) => a.when - b.when)) {
+      const cur = byCase.get(e.projectId);
+      if (cur) cur.more += 1; else byCase.set(e.projectId, { ...e, more: 0 });
+    }
+    // Fill in names for cases the calendar didn't name, from the Project Hub list if it's showing.
+    for (const row of document.querySelectorAll('.ag-row[row-id]')) {
+      const c = byCase.get(row.getAttribute('row-id'));
+      const a = row.querySelector('[col-id="ProjectName"] a');
+      if (c && !c.projectName && a) c.projectName = a.textContent.trim();
+    }
+    const list = [...byCase.values()];
+    list.forEach((c) => { if (!c.projectName) c.projectName = `Case ${c.projectId}`; });
+    return list;
+  }
+
+  // ---------- Project Hub: "Next Event" column ----------
+  // Adds a column at the end of the Project Hub table with each case's next
+  // calendar date and time. One calendar lookup for the whole list, reused for
+  // 5 minutes. Click its header to see the list sorted by next event (see below).
+  const NEXT_COL = 'pd9NextEvent';
+  const NEXT_COL_WIDTH = 165;
+  let hubEvents = null;      // Map: case id -> soonest event
+  let hubEventsAt = 0;
+  let hubEventsLoading = false;
+
+  function loadHubEvents() {
+    if (hubEventsLoading || (hubEvents && Date.now() - hubEventsAt < 5 * 60 * 1000)) return;
+    hubEventsLoading = true;
+    loadUpcoming()
+      .then((list) => { hubEvents = new Map(list.map((e) => [e.projectId, e])); hubEventsAt = Date.now(); })
+      .catch(() => { hubEvents = hubEvents || new Map(); hubEventsAt = Date.now() - 4 * 60 * 1000; }) // try again in a minute
+      .finally(() => { hubEventsLoading = false; showHubEvents(); const ov = document.getElementById('pd9-hub-sorted'); if (ov) drawOwnTable(ov); });
+  }
+
+  const shortDate = (d) => `${d.getMonth() + 1}/${d.getDate()}/${d.getFullYear()}`;
+  // Event name without " for ..." and everything after it ("Pretrial for Doe, John" -> "Pretrial").
+  const shortTitle = (t) => { const full = String(t || '').trim(); return full.replace(/\s+for\b[\s\S]*$/i, '').trim() || full; };
+
+  // "10/3/2026 9:00 AM", or just the date for all-day events.
+  const eventStamp = (e) => (e.dateOnly ? shortDate(e.when) : `${shortDate(e.when)} ${e.when.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}`);
+  const px = (el, prop) => parseFloat(el.style[prop]) || 0;
+
+  // The columns we add, in order. Only the date column sorts.
+  const HUB_EXTRA = [
+    { id: NEXT_COL, label: 'Next Event', width: NEXT_COL_WIDTH, text: (e) => eventStamp(e), sorts: true },
+    { id: 'pd9NextTitle', label: 'Event', width: 220, text: (e) => shortTitle(e.title) },
+  ];
+  const isOurs = (el) => HUB_EXTRA.some((c) => c.id === el.getAttribute('col-id'));
+
+  function showHubEvents() {
+    if (!onHub()) return;
+    const headerRow = $('.ag-header-row-column') || $('.ag-header-row');
+    const body = $('.ag-center-cols-container');
+    if (!headerRow || !body || !headerRow.querySelector('.ag-header-cell[col-id]')) return; // table not loaded yet
+    loadHubEvents();
+
+    // Where Filevine's own columns end; ours go after, one after another.
+    const theirs = [...headerRow.querySelectorAll('.ag-header-cell[col-id]')].filter((c) => !isOurs(c));
+    let left = Math.max(...theirs.map((c) => px(c, 'left') + px(c, 'width')));
+    const lefts = HUB_EXTRA.map((c) => { const at = left; left += c.width; return at; });
+    const total = left;
+
+    // Header cells: copies of Filevine's last header, relabeled (copies don't carry its sorting).
+    HUB_EXTRA.forEach((c, i) => {
+      let head = headerRow.querySelector(`[col-id="${c.id}"]`);
+      if (!head) {
+        head = theirs[theirs.length - 1].cloneNode(true);
+        head.setAttribute('col-id', c.id);
+        head.removeAttribute('aria-sort');
+        head.removeAttribute('aria-description');
+        head.classList.remove('ag-header-cell-sortable');
+        head.querySelectorAll('.ag-header-icon, .ag-header-cell-resize, input').forEach((el) => el.remove());
+        const t = head.querySelector('.ag-header-cell-text');
+        if (t) t.textContent = c.label;
+        if (c.sorts) {
+          head.title = 'Click to sort the list by next event';
+          head.style.cursor = 'pointer';
+          head.addEventListener('click', (ev) => { ev.preventDefault(); ev.stopPropagation(); openNextEventSort(); }, true);
+        }
+        headerRow.appendChild(head);
+      }
+      if (px(head, 'left') !== lefts[i]) { head.style.left = `${lefts[i]}px`; head.style.width = `${c.width}px`; }
+    });
+
+    // Make room: widen the table so the new columns aren't cut off.
+    const widen = (el, extra = 0) => { if (el && px(el, 'width') < total + extra) el.style.width = `${total + extra}px`; };
+    widen(headerRow);
+    widen($('.ag-header-container'), 8);
+    widen(body);
+    widen($('.ag-body-horizontal-scroll-container'));
+
+    // Cells. Rows get reused as you scroll, so match by case id each time.
+    for (const row of body.querySelectorAll('.ag-row[row-id]')) {
+      const pid = row.getAttribute('row-id');
+      const model = row.querySelector('.ag-cell[col-id="Created"]') || row.querySelector('.ag-cell:last-child');
+      const e = hubEvents && hubEvents.get(pid);
+      HUB_EXTRA.forEach((c, i) => {
+        let cell = row.querySelector(`[col-id="${c.id}"]`);
+        if (!cell) {
+          if (!model) return;
+          cell = model.cloneNode(false);
+          cell.setAttribute('col-id', c.id);
+          cell.removeAttribute('aria-colindex');
+          row.appendChild(cell);
+        }
+        if (px(cell, 'left') !== lefts[i]) { cell.style.left = `${lefts[i]}px`; cell.style.width = `${c.width}px`; }
+        const text = !hubEvents ? (i === 0 ? '...' : '') : e ? c.text(e) : '';
+        if (cell.dataset.pid !== pid || cell.textContent !== text) {
+          cell.dataset.pid = pid;
+          cell.textContent = text;
+          cell.title = e ? [e.title, e.location].filter(Boolean).join(' | ') : '';
+        }
+      });
+    }
+  }
+
+
+  // ---------- Project Hub: our own table ----------
+  // Columns: Case Number | Defendant (Last, First) | Last Activity | Next Event | Tags.
+  // Data:
+  //   the list:   POST /api/projectHub/search (the same request the Project Hub makes),
+  //               using the filters in the Project Hub's address
+  //   the names:  each client's contact card, GET /api/v2/org/<org>/project/<case>/person/<client>
+  //               (real first and last name fields, no guessing)
+  //   the events: the calendar (same as the Next Event column)
+  // It sits over Filevine's table. "Filevine's table" switches back (remembered).
+  const HUB_VIEW_KEY = 'pd9-hub-own-table';
+  const HUB_SORT_KEY = 'pd9-hub-own-sort';
+  const nameCache = new Map(); // client id -> "Last, First" (kept in memory only)
+  let hubTable = null; // { href, rows, loading }
+
+  // Filevine's own "Show archived" and "Pinned only" toggles in the filter bar.
+  function hubToggle(label) {
+    const span = [...document.querySelectorAll('.filters-and-pin label .form-field-label')].find((el) => el.textContent.trim().toLowerCase() === label);
+    const input = span && span.closest('label').querySelector('input[type=checkbox]');
+    return input ? input.checked : null;
+  }
+  const hubFilterKey = () => `${location.href}|${hubToggle('show archived')}|${hubToggle('pinned only')}`;
+
+  function hubParams() {
+    const q = new URLSearchParams((location.hash.split('?')[1]) || '');
+    const num = (k) => (q.get(k) && !isNaN(+q.get(k)) ? +q.get(k) : null);
+    const list = (k) => q.getAll(k).flatMap((v) => v.split(',')).map((v) => v.trim()).filter(Boolean);
+    return {
+      query: q.get('q') || q.get('query') || q.get('search') || '',
+      orgID: num('org') || num('orgID'),
+      includeArchived: q.has('archived') ? q.get('archived') !== 'false' : false,
+      filterByPhaseID: num('phase') || num('phaseID'),
+      filterByPhaseNames: list('phaseNames'),
+      filterByFirstPrimaryUserID: num('primary'),
+      filterByIsPrimary: q.get('isPrimary') === 'true',
+      filterByIsPinned: q.get('pinned') === 'true',
+      filterByIsFollowing: q.get('following') === 'true',
+      filterByProjectTypeID: num('type') || num('projectType'),
+      filterByHashtags: list('hashtags'),
+      filterByRoles: list('roles'),
+      ...(hubToggle('show archived') !== null ? { includeArchived: hubToggle('show archived') } : {}),
+      ...(hubToggle('pinned only') !== null ? { filterByIsPinned: hubToggle('pinned only') } : {}),
+      filterByMinimumAccessLevel: 0,
+      includeAggregateCounts: false,
+      sort: q.get('sort') || 'ProjectName',
+      direction: q.get('direction') || 'Ascending',
+    };
+  }
+
+  async function loadHubList(saved) {
+    const base = saved ? { ...saved } : hubParams();
+    if (!saved && onHub() && base.orgID) store.set(SWITCH_PARAMS_KEY, base); // remember "my cases" for the case switcher
+    if (!base.orgID) {
+      const any = hubEvents && [...hubEvents.values()][0];
+      base.orgID = null;
+      if (any && any.orgID) base.orgID = any.orgID;
+    }
+    const hits = [];
+    for (let skip = 0; skip < 2000; skip += 200) {
+      const res = await fetch('/api/projectHub/search', {
+        method: 'POST', credentials: 'include',
+        headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ...base, skip, take: 200 }),
+      });
+      if (!res.ok) throw new Error(`status ${res.status}`);
+      const json = await res.json();
+      const data = json && json.data;
+      if (!data || !Array.isArray(data.hits)) throw new Error(json && json.message ? json.message : 'unexpected reply');
+      hits.push(...data.hits);
+      if (!data.hasMore || !data.hits.length) break;
+    }
+    return hits.map((h) => ({
+      id: String(h.projectID || h.id),
+      orgID: h.orgID,
+      clientID: h.clientID,
+      caseNo: (String(h.projectName || '').split('|')[1] || h.number || '').trim(),
+      clientName: htmlToText(h.clientName || String(h.projectName || '').split('|')[0]),
+      lastActivity: h.lastActivity ? new Date(h.lastActivity) : null,
+      // Tags with their Filevine color (tagsV2 has the color; hashtags is just the names).
+      tags: (h.tagsV2 && h.tagsV2.length
+        ? h.tagsV2.filter((t) => !t.isArchived).map((t) => ({ name: t.name, color: t.colorNumber }))
+        : (h.hashtags || []).map((t) => ({ name: t, color: null })))
+        .map((t) => ({ name: String(t.name).startsWith('#') ? t.name : `#${t.name}`, color: t.color })),
+    }));
+  }
+
+  async function loadName(r) {
+    if (!r.clientID || !r.orgID) return null;
+    if (nameCache.has(r.clientID)) return nameCache.get(r.clientID);
+    const res = await fetch(`/api/v2/org/${encodeURIComponent(r.orgID)}/project/${encodeURIComponent(r.id)}/person/${encodeURIComponent(r.clientID)}`,
+      { credentials: 'include', headers: { Accept: 'application/json' } });
+    if (!res.ok) return null;
+    const p = findObjectsWith(await res.json(), 'lastName')[0];
+    const last = p && String(p.lastName || '').trim();
+    const first = p && String(p.firstName || '').trim();
+    const name = last ? (first ? `${last}, ${first}` : last) : null;
+    nameCache.set(r.clientID, name);
+    return name;
+  }
+
+  // Cases ticked for adding an activity to several at once (this page only).
+  const bulkPicked = new Set();
+  let bulkLastIndex = null;
+
+  // ---------- PD9 table: columns, look, and saved view ----------
+  const HUB_LAYOUT_KEY = 'pd9-hub-own-layout'; // { order: [...], widths: {...} }
+  const nextOf = (r) => hubEvents && hubEvents.get(r.id);
+  const OWN_COLS = [
+    { key: 'caseNo', label: 'Case Number', width: 190, sort: (r) => caseValue(r.caseNo) },
+    { key: 'defendant', label: 'Defendant', width: 230, sort: (r) => (r.defendant || r.clientName || '').toLowerCase() },
+    { key: 'lastActivity', label: 'Last Activity', width: 130, sort: (r) => (r.lastActivity ? r.lastActivity.getTime() : 0) },
+    { key: 'next', label: 'Next Event', width: 170, sort: (r) => { const e = nextOf(r); return e ? e.when.getTime() : null; } },
+    { key: 'event', label: 'Event', width: 220, sort: (r) => { const e = nextOf(r); return e && e.title ? shortTitle(e.title).toLowerCase() : null; } },
+    { key: 'tags', label: 'Tags', width: 260, sort: (r) => (r.tags.length ? r.tags.map((t) => t.name).join(' ').toLowerCase() : null) },
+  ];
+
+  function ownLayout() {
+    const saved = store.get(HUB_LAYOUT_KEY, null) || {};
+    const known = OWN_COLS.map((c) => c.key);
+    const order = (saved.order || []).filter((k) => known.includes(k));
+    known.forEach((k) => { if (!order.includes(k)) order.push(k); }); // new columns go at the end
+    return { order, widths: saved.widths || {} };
+  }
+  const saveLayout = (layout) => store.set(HUB_LAYOUT_KEY, layout);
+
+  // Use Filevine's font so the table feels native; the rest is our own look.
+  function matchFilevineLook(ov) {
+    const cell = $('.ag-center-cols-container .ag-cell') || $('.ag-header-cell');
+    if (cell) ov.style.setProperty('--pd9-font', getComputedStyle(cell).fontFamily);
+  }
+
+
+  // "Sep 29" this year, "Sep 29, 2025" otherwise; with the weekday for upcoming dates ("Fri, Oct 3").
+  function niceDate(d, weekday = false) {
+    const sameYear = d.getFullYear() === new Date().getFullYear();
+    return d.toLocaleDateString([], { ...(weekday ? { weekday: 'short' } : {}), month: 'short', day: 'numeric', ...(sameYear ? {} : { year: 'numeric' }) });
+  }
+
+  // A tag chip, tinted with the color Filevine gives that tag.
+  function tagChip(tag) {
+    const chip = document.createElement('button');
+    chip.type = 'button';
+    chip.className = 'pd9-tag';
+    if (tag.color != null) chip.style.setProperty('--pd9-tag', `var(--t-color-object-${tag.color}-primary, #1f7a77)`);
+    chip.textContent = tag.name.replace(/^#/, '');
+    chip.dataset.tag = tag.name.toLowerCase();
+    const on = tagFilter().tags.includes(chip.dataset.tag);
+    chip.classList.toggle('pd9-tag-on', on);
+    chip.setAttribute('aria-pressed', String(on));
+    chip.title = on ? `Stop filtering by ${tag.name}` : `Show only cases tagged ${tag.name}`;
+    chip.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); toggleTagFilter(chip.dataset.tag); });
+    return chip;
+  }
+
+  // ---------- tag filter for the PD9 table (saved) ----------
+  const TAG_FILTER_KEY = 'pd9-hub-own-tagfilter';
+  const tagFilter = () => { const f = store.get(TAG_FILTER_KEY, null) || {}; return { tags: f.tags || [], mode: f.mode === 'any' ? 'any' : 'all' }; };
+  function setTagFilter(f) {
+    store.set(TAG_FILTER_KEY, f);
+    const ov = document.getElementById('pd9-hub-sorted');
+    if (ov) drawOwnTable(ov);
+  }
+  function toggleTagFilter(tag) {
+    const f = tagFilter();
+    f.tags = f.tags.includes(tag) ? f.tags.filter((t) => t !== tag) : [...f.tags, tag];
+    setTagFilter(f);
+  }
+  function passesTagFilter(r) {
+    const f = tagFilter();
+    if (!f.tags.length) return true;
+    const mine = r.tags.map((t) => t.name.toLowerCase());
+    return f.mode === 'any' ? f.tags.some((t) => mine.includes(t)) : f.tags.every((t) => mine.includes(t));
+  }
+
+  // The funnel in the Tags header: every tag in the list, with counts.
+  function openTagMenu(anchor, ov) {
+    const old = ov.querySelector('.pd9-tag-menu');
+    if (old) { old.remove(); return; }
+    const counts = new Map();
+    const colors = new Map();
+    for (const r of hubTable.rows) for (const t of r.tags) {
+      const k = t.name.toLowerCase();
+      counts.set(k, (counts.get(k) || 0) + 1);
+      if (!colors.has(k)) colors.set(k, { name: t.name, color: t.color });
+    }
+    const menu = document.createElement('div');
+    menu.className = 'pd9-tag-menu';
+    menu.setAttribute('role', 'dialog');
+    menu.setAttribute('aria-label', 'Filter by tags');
+    const f = tagFilter();
+    menu.innerHTML = `
+      <div class="pd9-tm-head">
+        <input type="search" class="pd9-tm-find" placeholder="Find a tag" aria-label="Find a tag">
+        <div class="pd9-tm-mode" role="radiogroup" aria-label="Match">
+          <button type="button" data-mode="all" role="radio" aria-checked="${f.mode === 'all'}" title="Cases with every checked tag">All</button>
+          <button type="button" data-mode="any" role="radio" aria-checked="${f.mode === 'any'}" title="Cases with any checked tag">Any</button>
+        </div>
+      </div>
+      <div class="pd9-tm-list"></div>
+      <div class="pd9-tm-foot"><button type="button" class="pd9-tm-clear">Clear</button></div>`;
+    const list = menu.querySelector('.pd9-tm-list');
+    const sorted = [...counts.keys()].sort((a, b) => counts.get(b) - counts.get(a) || a.localeCompare(b));
+    const drawList = () => {
+      const q = menu.querySelector('.pd9-tm-find').value.trim().toLowerCase().replace(/^#/, '');
+      const cur = tagFilter();
+      list.textContent = '';
+      for (const k of sorted) {
+        if (q && !k.replace(/^#/, '').includes(q)) continue;
+        const row = document.createElement('label');
+        row.className = 'pd9-tm-row';
+        const cb = document.createElement('input');
+        cb.type = 'checkbox';
+        cb.checked = cur.tags.includes(k);
+        cb.addEventListener('change', () => { toggleTagFilter(k); drawList(); });
+        const chip = document.createElement('span');
+        chip.className = 'pd9-tag pd9-tag-static';
+        const c = colors.get(k);
+        if (c.color != null) chip.style.setProperty('--pd9-tag', `var(--t-color-object-${c.color}-primary, #1f7a77)`);
+        chip.textContent = c.name.replace(/^#/, '');
+        const n = document.createElement('span');
+        n.className = 'pd9-tm-count';
+        n.textContent = counts.get(k);
+        row.append(cb, chip, n);
+        list.appendChild(row);
+      }
+      if (!list.children.length) list.innerHTML = '<p class="pd9-tm-empty">No tags match.</p>';
+    };
+    menu.querySelector('.pd9-tm-find').addEventListener('input', drawList);
+    menu.querySelectorAll('.pd9-tm-mode button').forEach((b) => b.addEventListener('click', () => {
+      setTagFilter({ ...tagFilter(), mode: b.dataset.mode });
+      menu.querySelectorAll('.pd9-tm-mode button').forEach((x) => x.setAttribute('aria-checked', String(x === b)));
+    }));
+    menu.querySelector('.pd9-tm-clear').addEventListener('click', () => { setTagFilter({ ...tagFilter(), tags: [] }); drawList(); });
+    drawList();
+    const r = anchor.getBoundingClientRect();
+    const o = ov.getBoundingClientRect();
+    menu.style.top = `${r.bottom - o.top + 4}px`;
+    menu.style.left = `${Math.max(8, Math.min(r.left - o.left, o.width - 288))}px`;
+    ov.appendChild(menu);
+    menu.querySelector('.pd9-tm-find').focus();
+    const away = (e) => {
+      if (!menu.isConnected) { document.removeEventListener('pointerdown', away, true); document.removeEventListener('keydown', esc, true); return; }
+      if (!menu.contains(e.target) && !e.target.closest('.pd9-tag-funnel')) { menu.remove(); document.removeEventListener('pointerdown', away, true); document.removeEventListener('keydown', esc, true); }
+    };
+    const esc = (e) => { if (e.key === 'Escape') { e.stopPropagation(); menu.remove(); anchor.focus(); } };
+    document.addEventListener('pointerdown', away, true);
+    document.addEventListener('keydown', esc, true);
+  }
+
+
+
+  function cellFor(key, r, td) {
+    const e = nextOf(r);
+    switch (key) {
+      case 'caseNo': {
+        const a = document.createElement('a');
+        a.href = `#/project/${encodeURIComponent(r.id)}/activity`;
+        a.textContent = r.caseNo || `Case ${r.id}`;
+        // Window mode: open in a case window. Otherwise: open in the case tab.
+        // All cases share one case tab, so after the first, switching cases there
+        // skips reloading all of Filevine. Ctrl+click still opens a fresh tab.
+        a.target = CASE_TAB;
+        // Middle click opens a new tab the browser's normal way (the link's address).
+        a.addEventListener('click', (ev) => {
+          if (ev.button !== 0) return;
+          if (ev.ctrlKey || ev.metaKey || ev.shiftKey) { ev.preventDefault(); window.open(a.href, '_blank', 'noopener'); return; } // a fresh tab
+          if (!windowMode()) return; // the shared case tab, as the link says
+          ev.preventDefault();
+          openCaseWindow(r.id, `${r.caseNo || ''}  ${r.defendant || r.clientName || ''}`.trim());
+        });
+        td.appendChild(a);
+        break;
+      }
+      case 'defendant':
+        td.textContent = r.defendant || r.clientName || '';
+        if (!r.defendant) td.classList.add('pd9-own-pending');
+        break;
+      case 'lastActivity': td.textContent = r.lastActivity ? niceDate(r.lastActivity) : ''; break;
+      case 'next': {
+        if (!hubEvents) { td.innerHTML = '<span class="pd9-skel-line"></span>'; break; }
+        if (!e) { td.innerHTML = '<span class="pd9-none">None scheduled</span>'; break; }
+        const days = Math.round((new Date(e.when).setHours(0, 0, 0, 0) - new Date().setHours(0, 0, 0, 0)) / 864e5);
+        const tile = document.createElement('span');
+        tile.className = `pd9-when${days <= 2 ? ' pd9-soon' : ''}`;
+        const d1 = document.createElement('span');
+        d1.className = 'pd9-when-day';
+        d1.textContent = days === 0 ? 'Today' : days === 1 ? 'Tomorrow' : niceDate(e.when, true);
+        const d2 = document.createElement('span');
+        d2.className = 'pd9-when-time';
+        d2.textContent = e.dateOnly ? 'All day' : e.when.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+        tile.append(d1, d2);
+        td.appendChild(tile);
+        td.title = `${eventStamp(e)}${e.title ? `\n${e.title}` : ''}${e.location ? `\n${e.location}` : ''}`;
+        break;
+      }
+      case 'event':
+        td.textContent = e ? shortTitle(e.title) : '';
+        if (e) td.title = [e.title, e.location].filter(Boolean).join('\n'); // full name on hover
+        break;
+      case 'tags': r.tags.forEach((t) => td.appendChild(tagChip(t))); td.classList.add('pd9-own-tags'); break;
+      default: break;
+    }
+  }
+
+  function drawOwnTable(ov) {
+    if (!hubTable || !hubTable.rows) return;
+    const layout = ownLayout();
+    const cols = layout.order.map((k) => OWN_COLS.find((c) => c.key === k));
+    const sort = store.get(HUB_SORT_KEY, null) || { col: 'next', dir: 'asc' };
+    const col = OWN_COLS.find((c) => c.key === sort.col) || OWN_COLS[3];
+    const rows = hubTable.rows.filter(passesTagFilter).sort((a, b) => {
+      const x = col.sort(a), y = col.sort(b);
+      if (x === null && y === null) return 0;
+      if (x === null) return 1; // nothing to sort on: always at the bottom
+      if (y === null) return -1;
+      const c = typeof x === 'number' && typeof y === 'number' ? x - y : String(x).localeCompare(String(y), undefined, { numeric: true });
+      return sort.dir === 'asc' ? c : -c;
+    });
+
+    const wrap = ov.querySelector('.pd9-hs-wrap');
+    const keepScroll = [wrap.scrollTop, wrap.scrollLeft];
+    wrap.textContent = '';
+    const table = document.createElement('table');
+    const colgroup = document.createElement('colgroup');
+    const pickCol = document.createElement('col'); pickCol.style.width = '40px'; colgroup.appendChild(pickCol);
+    cols.forEach((c) => { const el = document.createElement('col'); el.style.width = `${layout.widths[c.key] || c.width}px`; el.dataset.key = c.key; colgroup.appendChild(el); });
+    table.style.width = `${40 + cols.reduce((n, c) => n + (layout.widths[c.key] || c.width), 0)}px`;
+
+    const head = document.createElement('tr');
+    // Select all (the rows showing, so it respects the tag filter).
+    const allTh = document.createElement('th');
+    allTh.className = 'pd9-pick';
+    const all = document.createElement('input');
+    all.type = 'checkbox';
+    all.setAttribute('aria-label', 'Select all cases showing');
+    const shownIds = rows.map((r) => r.id);
+    const picked = shownIds.filter((id) => bulkPicked.has(id)).length;
+    all.checked = picked > 0 && picked === shownIds.length;
+    all.indeterminate = picked > 0 && picked < shownIds.length;
+    all.addEventListener('change', () => { shownIds.forEach((id) => (all.checked ? bulkPicked.add(id) : bulkPicked.delete(id))); drawOwnTable(ov); });
+    allTh.appendChild(all);
+    head.appendChild(allTh);
+    cols.forEach((c) => {
+      const th = document.createElement('th');
+      th.dataset.key = c.key;
+      th.draggable = true;
+      th.setAttribute('aria-sort', c.key === col.key ? (sort.dir === 'asc' ? 'ascending' : 'descending') : 'none');
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.textContent = c.label;
+      const arrow = document.createElement('span');
+      arrow.className = 'pd9-sort-arrow';
+      arrow.setAttribute('aria-hidden', 'true');
+      arrow.textContent = c.key === col.key ? (sort.dir === 'asc' ? '\u2191' : '\u2193') : '\u2195';
+      b.appendChild(arrow);
+      if (c.key === col.key) th.classList.add('pd9-sorted');
+      b.title = 'Click to sort. Drag to move. Drag the right edge to resize.';
+      b.addEventListener('click', () => {
+        store.set(HUB_SORT_KEY, { col: c.key, dir: c.key === col.key && sort.dir === 'asc' ? 'desc' : 'asc' });
+        drawOwnTable(ov);
+      });
+      th.appendChild(b);
+      if (c.key === 'tags') {
+        const active = tagFilter().tags.length;
+        const fb = document.createElement('button');
+        fb.type = 'button';
+        fb.className = 'pd9-tag-funnel' + (active ? ' pd9-funnel-on' : '');
+        fb.title = active ? `Filtering by ${active} tag${active === 1 ? '' : 's'}` : 'Filter by tags';
+        fb.setAttribute('aria-label', fb.title);
+        fb.innerHTML = '<svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path d="M4 5h16l-6 7.5V19l-4-2v-4.5z" fill="' + (active ? 'currentColor' : 'none') + '" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></svg>' + (active ? `<span>${active}</span>` : '');
+        fb.addEventListener('click', (e) => { e.stopPropagation(); openTagMenu(fb, ov); });
+        th.appendChild(fb);
+      }
+
+      // Resize: drag the right edge.
+      const grip = document.createElement('span');
+      grip.className = 'pd9-col-grip';
+      grip.setAttribute('aria-hidden', 'true');
+      grip.addEventListener('pointerdown', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        th.draggable = false;
+        const colEl = colgroup.querySelector(`col[data-key="${c.key}"]`);
+        const startX = e.clientX;
+        const startW = parseFloat(colEl.style.width);
+        const startT = parseFloat(table.style.width);
+        grip.setPointerCapture(e.pointerId);
+        const move = (ev) => {
+          const w = Math.max(70, startW + ev.clientX - startX);
+          colEl.style.width = `${w}px`;
+          table.style.width = `${startT + w - startW}px`;
+        };
+        const up = () => {
+          grip.removeEventListener('pointermove', move);
+          grip.removeEventListener('pointerup', up);
+          th.draggable = true;
+          const l = ownLayout();
+          l.widths[c.key] = Math.round(parseFloat(colEl.style.width));
+          saveLayout(l);
+        };
+        grip.addEventListener('pointermove', move);
+        grip.addEventListener('pointerup', up);
+      });
+      th.appendChild(grip);
+
+      // Reorder: drag a header onto another.
+      th.addEventListener('dragstart', (e) => { e.dataTransfer.setData('text/plain', c.key); e.dataTransfer.effectAllowed = 'move'; th.classList.add('pd9-dragging-col'); });
+      th.addEventListener('dragend', () => th.classList.remove('pd9-dragging-col'));
+      th.addEventListener('dragover', (e) => { e.preventDefault(); th.classList.add('pd9-drop-target'); });
+      th.addEventListener('dragleave', () => th.classList.remove('pd9-drop-target'));
+      th.addEventListener('drop', (e) => {
+        e.preventDefault();
+        th.classList.remove('pd9-drop-target');
+        const from = e.dataTransfer.getData('text/plain');
+        if (!from || from === c.key) return;
+        const l = ownLayout();
+        l.order = l.order.filter((k) => k !== from);
+        l.order.splice(l.order.indexOf(c.key), 0, from);
+        saveLayout(l);
+        drawOwnTable(ov);
+      });
+      head.appendChild(th);
+    });
+
+    const thead = document.createElement('thead'); thead.appendChild(head);
+    const tbody = document.createElement('tbody');
+    rows.forEach((r, i) => {
+      const tr = document.createElement('tr');
+      if (bulkPicked.has(r.id)) tr.classList.add('pd9-picked');
+      const pick = document.createElement('td');
+      pick.className = 'pd9-pick';
+      const cb = document.createElement('input');
+      cb.type = 'checkbox';
+      cb.checked = bulkPicked.has(r.id);
+      cb.setAttribute('aria-label', `Select ${r.caseNo}`);
+      cb.addEventListener('click', (e) => {
+        // Shift+click selects everything between this and the last one you clicked.
+        if (e.shiftKey && bulkLastIndex != null) {
+          const [a, b] = [Math.min(bulkLastIndex, i), Math.max(bulkLastIndex, i)];
+          rows.slice(a, b + 1).forEach((x) => (cb.checked ? bulkPicked.add(x.id) : bulkPicked.delete(x.id)));
+        } else if (cb.checked) bulkPicked.add(r.id); else bulkPicked.delete(r.id);
+        bulkLastIndex = i;
+        drawOwnTable(ov);
+      });
+      pick.appendChild(cb);
+      tr.appendChild(pick);
+      for (const c of cols) { const td = document.createElement('td'); td.dataset.key = c.key; cellFor(c.key, r, td); tr.appendChild(td); }
+      tbody.appendChild(tr);
+    });
+    table.append(colgroup, thead, tbody);
+    wrap.appendChild(table);
+    [wrap.scrollTop, wrap.scrollLeft] = keepScroll;
+    const named = hubTable.rows.filter((r) => r.defendant !== undefined).length;
+    const soon = rows.filter((r) => { const e = nextOf(r); return e && e.when - Date.now() < 3 * 864e5; }).length;
+    const tf = tagFilter();
+    const status = ov.querySelector('.pd9-hs-status');
+    status.textContent = (tf.tags.length ? `${rows.length} of ${hubTable.rows.length} projects` : `${rows.length} projects`) + (soon ? `, ${soon} with an event in the next 3 days` : '');
+    let act = ov.querySelector('.pd9-bulk-bar');
+    if (!act) { act = document.createElement('span'); act.className = 'pd9-bulk-bar'; ov.querySelector('.pd9-hs-bar').appendChild(act); }
+    act.textContent = '';
+    const nPicked = hubTable.rows.filter((r) => bulkPicked.has(r.id)).length;
+    if (nPicked) {
+      const label = document.createElement('span');
+      label.className = 'pd9-bulk-count';
+      label.textContent = `${nPicked} selected`;
+      const mk = (text, cls, fn) => { const b = document.createElement('button'); b.type = 'button'; b.className = cls; b.textContent = text; b.addEventListener('click', fn); return b; };
+      const pickedRows = () => hubTable.rows.filter((r) => bulkPicked.has(r.id));
+      act.append(label,
+        mk('Add note', 'pd9-bulk-btn pd9-bulk-primary', () => openBulkComposer('note', pickedRows())),
+        mk('Add task', 'pd9-bulk-btn', () => openBulkComposer('task', pickedRows())),
+        mk('Clear', 'pd9-bulk-link', () => { bulkPicked.clear(); drawOwnTable(ov); }));
+    }
+    let chips = ov.querySelector('.pd9-hs-filters');
+    if (!chips) { chips = document.createElement('span'); chips.className = 'pd9-hs-filters'; status.after(chips); }
+    chips.textContent = '';
+    if (tf.tags.length) {
+      const lead = document.createElement('span');
+      lead.className = 'pd9-hs-lead';
+      lead.textContent = tf.tags.length > 1 ? `Tagged (${tf.mode === 'all' ? 'all' : 'any'} of):` : 'Tagged:';
+      chips.appendChild(lead);
+      for (const t of tf.tags) {
+        const x = document.createElement('button');
+        x.type = 'button';
+        x.className = 'pd9-hs-chip';
+        const shown = (hubTable.rows.flatMap((r) => r.tags).find((g) => g.name.toLowerCase() === t) || { name: t }).name;
+        x.textContent = shown.replace(/^#/, '');
+        x.title = `Remove ${shown}`;
+        x.addEventListener('click', () => toggleTagFilter(t));
+        chips.appendChild(x);
+      }
+      const clr = document.createElement('button');
+      clr.type = 'button';
+      clr.className = 'pd9-hs-clear';
+      clr.textContent = 'Clear';
+      clr.addEventListener('click', () => setTagFilter({ ...tf, tags: [] }));
+      chips.appendChild(clr);
+    }
+    const bar = ov.querySelector('.pd9-hs-progress');
+    if (bar) { bar.style.width = `${Math.round((named / Math.max(rows.length, 1)) * 100)}%`; bar.hidden = named >= rows.length; }
+  }
+
+  async function buildOwnTable(ov) {
+    const href = hubFilterKey();
+    hubTable = { href, rows: null };
+    ov.querySelector('.pd9-hs-status').textContent = 'Loading the case list...';
+    loadHubEvents();
+    let rows;
+    try { rows = await loadHubList(); } catch (err) {
+      if (hubTable && hubTable.href === href) ov.querySelector('.pd9-hs-status').textContent = `Could not load the case list (${err.message}). Use "Filevine's table".`;
+      return;
+    }
+    if (!hubTable || hubTable.href !== href) return;
+    hubTable.rows = rows;
+    publishSwitchList(rows);
+    drawOwnTable(ov);
+    // Real first and last names, a few at a time; redraw as they come in.
+    let next = 0;
+    let redraw = null;
+    const worker = async () => {
+      while (next < rows.length && hubTable && hubTable.href === href) {
+        const r = rows[next++];
+        try { r.defendant = await loadName(r); } catch (e) { r.defendant = null; }
+        clearTimeout(redraw);
+        redraw = setTimeout(() => { if (ov.isConnected) drawOwnTable(ov); }, 120);
+      }
+    };
+    await Promise.all([worker(), worker(), worker(), worker(), worker(), worker()]);
+    if (hubTable && hubTable.href === href) publishSwitchList(rows); // now with Last, First names
+    if (ov.isConnected) drawOwnTable(ov);
+  }
+
+  // The "Alternate table" checkbox above the table switches between ours and Filevine's.
+  function showOwnTable(force) {
+    if (!onHub()) { hubTable = null; return; }
+    const grid = $('.ag-root-wrapper');
+    if (!grid) return;
+    const host = grid.parentElement;
+    const useOwn = force === true || (force !== false && store.get(HUB_VIEW_KEY, true));
+    let ov = document.getElementById('pd9-hub-sorted');
+    let toggle = document.getElementById('pd9-hub-toggle');
+    if (!toggle) {
+      // Copy Filevine's own "Pinned only" toggle so it looks and sits like the others.
+      const pinned = [...document.querySelectorAll('.filters-and-pin label')].find((l) => /pinned only/i.test(l.textContent));
+      if (pinned) {
+        toggle = pinned.cloneNode(true);
+        toggle.querySelector('.form-field-label').textContent = 'Alternate table';
+      } else {
+        toggle = document.createElement('label');
+        toggle.innerHTML = '<input type="checkbox"> Alternate table';
+        toggle.classList.add('pd9-hub-toggle-plain');
+      }
+      toggle.id = 'pd9-hub-toggle';
+      toggle.title = 'PD9 table: case number, defendant (last, first), next event, and tags. Your columns and sort are saved.';
+      toggle.querySelector('input').addEventListener('change', (e) => {
+        e.target.setAttribute('aria-checked', String(e.target.checked));
+        store.set(HUB_VIEW_KEY, e.target.checked);
+        if (!e.target.checked) { const o = document.getElementById('pd9-hub-sorted'); if (o) o.remove(); hubTable = null; }
+        showOwnTable(e.target.checked);
+      });
+      const pinnedNow = [...document.querySelectorAll('.filters-and-pin label')].find((l) => l !== toggle && /pinned only/i.test(l.textContent));
+      if (pinnedNow) pinnedNow.after(toggle); else host.parentElement.insertBefore(toggle, host);
+    }
+    const box = toggle.querySelector('input');
+    if (box.checked !== useOwn) { box.checked = useOwn; box.setAttribute('aria-checked', String(useOwn)); }
+    if (!document.getElementById('pd9-win-toggle')) {
+      const w = toggle.cloneNode(true);
+      w.id = 'pd9-win-toggle';
+      w.classList.remove('pd9-hub-toggle-plain');
+      if (toggle.classList.contains('pd9-hub-toggle-plain')) w.classList.add('pd9-hub-toggle-plain');
+      (w.querySelector('.form-field-label') || w.lastChild).textContent = w.querySelector('.form-field-label') ? 'Window mode' : ' Window mode';
+      w.title = 'Open cases from the PD9 table in movable windows. When off, cases open in a new tab.';
+      const wb = w.querySelector('input');
+      wb.checked = windowMode();
+      wb.setAttribute('aria-checked', String(wb.checked));
+      wb.addEventListener('change', (e) => { store.set(WIN_MODE_KEY, e.target.checked); e.target.setAttribute('aria-checked', String(e.target.checked)); });
+      toggle.after(w);
+    }
+    if (!useOwn) { if (ov) ov.remove(); return; }
+    if (!ov) {
+      ov = document.createElement('div');
+      ov.id = 'pd9-hub-sorted';
+      ov.innerHTML = '<div class="pd9-hs-bar"><span class="pd9-hs-status"></span><span class="pd9-hs-track"><span class="pd9-hs-progress"></span></span></div><div class="pd9-hs-wrap"></div>';
+      if (getComputedStyle(host).position === 'static') host.style.position = 'relative';
+      host.appendChild(ov);
+      matchFilevineLook(ov);
+      buildOwnTable(ov);
+    } else if (!hubTable || hubTable.href !== hubFilterKey()) {
+      buildOwnTable(ov); // filters changed
+    }
+  }
+
+  // Clicking the Next Event header in Filevine's table opens our table sorted by it.
+  function openNextEventSort() {
+    store.set(HUB_VIEW_KEY, true);
+    store.set(HUB_SORT_KEY, { col: 'next', dir: 'asc' });
+    const ov = document.getElementById('pd9-hub-sorted');
+    if (ov) drawOwnTable(ov); else showOwnTable(true);
+  }
+
+
+
+  const CASE_TAB = 'pd9-case-tab';
+
+  // ---------- Window mode: cases in movable windows ----------
+  // Each window holds the case in a frame. Drag the title bar to move, drag the
+  // corner to resize, minimize to the bar at the bottom, open as many as you like.
+  // Windows stay open while you move around Filevine and come back after a reload.
+  const WIN_MODE_KEY = 'pd9-window-mode';
+  const WIN_LIST_KEY = 'pd9-case-windows';
+  const windowMode = () => store.get(WIN_MODE_KEY, false);
+  let winZ = 100010;
+
+  const winState = () => { try { return JSON.parse(sessionStorage.getItem(WIN_LIST_KEY) || '[]'); } catch (e) { return []; } };
+  function saveWindows() {
+    const list = [...document.querySelectorAll('.pd9-win:not(.pd9-win-spare)')].map((w) => {
+      const r = w.getBoundingClientRect();
+      return { id: w.dataset.pid, title: w.dataset.title, href: w.dataset.href || '', auto: w.dataset.auto || '', min: w.classList.contains('pd9-win-min'), max: w.classList.contains('pd9-win-max'),
+        box: w.dataset.box ? JSON.parse(w.dataset.box) : { left: r.left, top: r.top, width: r.width, height: r.height }, z: +w.style.zIndex || 0 };
+    });
+    try { sessionStorage.setItem(WIN_LIST_KEY, JSON.stringify(list)); } catch (e) { /* ignore */ }
+  }
+
+  function taskbar() {
+    let bar = document.getElementById('pd9-taskbar');
+    if (!bar) {
+      bar = document.createElement('div');
+      bar.id = 'pd9-taskbar';
+      bar.setAttribute('role', 'toolbar');
+      bar.setAttribute('aria-label', 'Open case windows');
+      document.body.appendChild(bar);
+    }
+    return bar;
+  }
+  function drawTaskbar() {
+    const bar = taskbar();
+    const wins = [...document.querySelectorAll('.pd9-win:not(.pd9-win-spare)')];
+    bar.hidden = !wins.length;
+    bar.textContent = '';
+    const top = wins.filter((w) => !w.classList.contains('pd9-win-min')).sort((a, b) => b.style.zIndex - a.style.zIndex)[0];
+    // Home: minimize every window and show the page underneath.
+    const home = document.createElement('button');
+    home.type = 'button';
+    home.className = 'pd9-task-home';
+    home.title = 'Minimize all windows';
+    home.setAttribute('aria-label', 'Minimize all windows');
+    home.innerHTML = '<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="M4 11.5 12 5l8 6.5M6.5 10v9h11v-9" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+    home.addEventListener('click', () => {
+      document.querySelectorAll('.pd9-win:not(.pd9-win-spare)').forEach((w) => { w.classList.add('pd9-win-min'); w.classList.remove('pd9-win-focus'); });
+      drawTaskbar();
+      saveWindows();
+    });
+    bar.appendChild(home);
+    const sep = document.createElement('span');
+    sep.className = 'pd9-task-sep';
+    sep.setAttribute('aria-hidden', 'true');
+    bar.appendChild(sep);
+    for (const w of wins) {
+      const item = document.createElement('span');
+      item.className = 'pd9-task' + (w === top ? ' pd9-task-active' : '') + (w.classList.contains('pd9-win-min') ? ' pd9-task-min' : '');
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'pd9-task-name';
+      b.textContent = w.dataset.title;
+      b.title = w.dataset.title;
+      b.addEventListener('click', () => {
+        if (w.classList.contains('pd9-win-min')) { w.classList.remove('pd9-win-min'); focusWindow(w); }
+        else if (w === top) minimizeWindow(w);
+        else focusWindow(w);
+      });
+      const x = document.createElement('button');
+      x.type = 'button';
+      x.className = 'pd9-task-x';
+      x.title = 'Close this window';
+      x.setAttribute('aria-label', `Close ${w.dataset.title}`);
+      x.innerHTML = '<svg viewBox="0 0 24 24" width="12" height="12" aria-hidden="true"><path d="M7 7l10 10M17 7L7 17" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/></svg>';
+      x.addEventListener('click', (e) => { e.stopPropagation(); closeWindow(w); });
+      item.append(b, x);
+      bar.appendChild(item);
+    }
+  }
+
+  function focusWindow(w) {
+    w.style.zIndex = ++winZ;
+    document.querySelectorAll('.pd9-win:not(.pd9-win-spare)').forEach((x) => x.classList.toggle('pd9-win-focus', x === w));
+    drawTaskbar();
+    saveWindows();
+  }
+  function minimizeWindow(w) { w.classList.add('pd9-win-min'); w.classList.remove('pd9-win-focus'); drawTaskbar(); saveWindows(); }
+  function closeWindow(w) { w.remove(); drawTaskbar(); saveWindows(); }
+  function toggleMax(w) { w.classList.toggle('pd9-win-max'); placeWin(w); saveWindows(); }
+
+  function placeWin(w) {
+    if (w.classList.contains('pd9-win-max')) { ['left', 'top', 'width', 'height'].forEach((k) => { w.style[k] = ''; }); return; }
+    const b = JSON.parse(w.dataset.box);
+    const vw = window.innerWidth, vh = window.innerHeight;
+    b.width = Math.min(Math.max(b.width, 360), vw - 16);
+    b.height = Math.min(Math.max(b.height, 240), vh - 68);
+    b.left = Math.min(Math.max(b.left, 8 - b.width + 120), vw - 120);
+    // Keep the bottom (and its resize corner) above the bar at the bottom of the screen.
+    b.top = Math.min(Math.max(b.top, 8), Math.max(8, vh - 60 - b.height));
+    w.dataset.box = JSON.stringify(b);
+    Object.assign(w.style, { left: `${b.left}px`, top: `${b.top}px`, width: `${b.width}px`, height: `${b.height}px` });
+  }
+
+  // While dragging or resizing, frames would swallow the mouse; turn them off for a moment.
+  const shield = (on) => document.documentElement.classList.toggle('pd9-win-busy', on);
+
+  // A spare window that has already loaded Filevine, kept out of sight. Opening a
+  // case uses it and just switches it to that case, which is much faster than
+  // starting Filevine from scratch. A new spare warms up in the background.
+  function makeSpare() {
+    if (IN_FRAME || !windowMode() || document.querySelector('.pd9-win-spare')) return;
+    const w = openCaseWindow('', 'Spare', null, true);
+    const frame = w.querySelector('iframe');
+    frame.addEventListener('load', () => setTimeout(() => { w.dataset.warm = '1'; }, 1500), { once: true });
+  }
+  setInterval(() => { if (!IN_FRAME && windowMode()) makeSpare(); }, 15000);
+
+  function openCaseWindow(id, title, restore, spare = false) {
+    const existing = document.querySelector(`.pd9-win:not(.pd9-win-spare)[data-pid="${CSS.escape(String(id))}"]`);
+    if (existing && !restore) { existing.classList.remove('pd9-win-min'); focusWindow(existing); return existing; }
+    const warm = !restore && !spare && document.querySelector('.pd9-win-spare[data-warm="1"]');
+    if (warm) {
+      const n0 = document.querySelectorAll('.pd9-win:not(.pd9-win-spare)').length;
+      warm.classList.remove('pd9-win-spare');
+      delete warm.dataset.warm;
+      warm.dataset.pid = id;
+      warm.dataset.title = title || `Case ${id}`;
+      warm.setAttribute('aria-label', warm.dataset.title);
+      warm.querySelector('.pd9-win-title').textContent = warm.dataset.title;
+      const f = warm.querySelector('iframe');
+      f.title = warm.dataset.title;
+      try { f.contentWindow.location.hash = `#/project/${encodeURIComponent(id)}/activity`; } catch (e) { f.src = `${location.origin}${location.pathname}#/project/${encodeURIComponent(id)}/activity`; }
+      warm.dataset.box = JSON.stringify({ left: 80 + (n0 % 8) * 32, top: 70 + (n0 % 8) * 32, width: Math.min(1100, window.innerWidth - 160), height: Math.min(760, window.innerHeight - 140) });
+      placeWin(warm);
+      focusWindow(warm);
+      setTimeout(makeSpare, 4000);
+      return warm;
+    }
+    const n = document.querySelectorAll('.pd9-win:not(.pd9-win-spare)').length;
+    const w = document.createElement('section');
+    w.className = 'pd9-win';
+    w.dataset.pid = id;
+    w.dataset.title = title || `Case ${id}`;
+    w.setAttribute('role', 'dialog');
+    w.setAttribute('aria-label', w.dataset.title);
+    const box = restore && restore.box ? restore.box : {
+      left: 80 + (n % 8) * 32, top: 70 + (n % 8) * 32,
+      width: Math.min(1100, window.innerWidth - 160), height: Math.min(760, window.innerHeight - 140),
+    };
+    w.dataset.box = JSON.stringify(box);
+    w.innerHTML = `
+      <header class="pd9-win-head">
+        <span class="pd9-win-title"></span>
+        <button type="button" class="pd9-win-btn pd9-win-new" title="Open in a new tab" aria-label="Open in a new tab"><svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true"><path d="M14 5h5v5M19 5l-8 8M18 14v5H5V6h5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+        <button type="button" class="pd9-win-btn pd9-win-minbtn" title="Minimize" aria-label="Minimize"><svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true"><path d="M6 17h12" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></button>
+        <button type="button" class="pd9-win-btn pd9-win-maxbtn" title="Maximize" aria-label="Maximize"><svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="1.5" fill="none" stroke="currentColor" stroke-width="2"/></svg></button>
+        <button type="button" class="pd9-win-btn pd9-win-x" title="Close" aria-label="Close"><svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true"><path d="M7 7l10 10M17 7L7 17" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></button>
+      </header>
+      <div class="pd9-win-body"><iframe title="" loading="eager"></iframe></div>
+      <span class="pd9-win-grip" aria-hidden="true"></span>`;
+    w.querySelector('.pd9-win-title').textContent = w.dataset.title;
+    const frame = w.querySelector('iframe');
+    frame.title = w.dataset.title;
+    frame.src = spare ? `${location.origin}${location.pathname}#/` : (restore && restore.href) || `${location.origin}${location.pathname}#/project/${encodeURIComponent(id)}/activity`;
+    if (spare) { w.classList.add('pd9-win-spare'); w.setAttribute('aria-hidden', 'true'); }
+    document.body.appendChild(w);
+    if (restore && restore.max) w.classList.add('pd9-win-max');
+    if (restore && restore.auto) w.dataset.auto = restore.auto;
+    if (restore && restore.min) w.classList.add('pd9-win-min');
+    placeWin(w);
+
+    const head = w.querySelector('.pd9-win-head');
+    w.addEventListener('pointerdown', () => focusWindow(w), true);
+    head.addEventListener('dblclick', (e) => { if (!e.target.closest('button')) toggleMax(w); });
+    head.addEventListener('pointerdown', (e) => {
+      if (e.button !== 0 || e.target.closest('button') || w.classList.contains('pd9-win-max')) return;
+      e.preventDefault();
+      const b = JSON.parse(w.dataset.box);
+      const dx = e.clientX - b.left, dy = e.clientY - b.top;
+      head.setPointerCapture(e.pointerId);
+      shield(true);
+      const move = (ev) => { b.left = ev.clientX - dx; b.top = ev.clientY - dy; w.dataset.box = JSON.stringify(b); placeWin(w); };
+      const up = () => { head.removeEventListener('pointermove', move); head.removeEventListener('pointerup', up); shield(false); saveWindows(); };
+      head.addEventListener('pointermove', move);
+      head.addEventListener('pointerup', up);
+    });
+    const grip = w.querySelector('.pd9-win-grip');
+    grip.addEventListener('pointerdown', (e) => {
+      if (e.button !== 0 || w.classList.contains('pd9-win-max')) return;
+      e.preventDefault();
+      const b = JSON.parse(w.dataset.box);
+      const sx = e.clientX, sy = e.clientY, sw = b.width, sh = b.height;
+      grip.setPointerCapture(e.pointerId);
+      shield(true);
+      const move = (ev) => { b.width = sw + ev.clientX - sx; b.height = sh + ev.clientY - sy; w.dataset.box = JSON.stringify(b); placeWin(w); };
+      const up = () => { grip.removeEventListener('pointermove', move); grip.removeEventListener('pointerup', up); shield(false); saveWindows(); };
+      grip.addEventListener('pointermove', move);
+      grip.addEventListener('pointerup', up);
+    });
+    w.querySelector('.pd9-win-minbtn').addEventListener('click', () => minimizeWindow(w));
+    w.querySelector('.pd9-win-maxbtn').addEventListener('click', () => toggleMax(w));
+    w.querySelector('.pd9-win-x').addEventListener('click', () => closeWindow(w));
+    w.querySelector('.pd9-win-new').addEventListener('click', () => window.open(w.dataset.href || frame.src, '_blank', 'noopener'));
+    if (spare) return w;
+    if (restore && restore.z) w.style.zIndex = restore.z, winZ = Math.max(winZ, restore.z);
+    else focusWindow(w);
+    drawTaskbar();
+    saveWindows();
+    setTimeout(makeSpare, 4000);
+    return w;
+  }
+
+  // Keep each window's name in step with what it's showing. If you click into a
+  // different case inside a window, its title bar and the bottom bar follow along.
+  function frameTitle(docTitle) {
+    const t = docTitle.replace(/\s*\|\s*Filevine\s*$/i, '').trim();
+    const bar = t.indexOf('|');
+    return bar < 0 ? t : `${t.slice(bar + 1).trim()}  ${t.slice(0, bar).trim()}`; // "case number  Name", like the table
+  }
+  function syncWindowTitles() {
+    let changed = false;
+    for (const w of document.querySelectorAll('.pd9-win:not(.pd9-win-spare)')) {
+      const frame = w.querySelector('iframe');
+      let href, docTitle;
+      try { href = frame.contentWindow.location.href; docTitle = frame.contentWindow.document.title || ''; } catch (e) { continue; }
+      if (!href || href === 'about:blank') continue;
+      const key = `${href}|${docTitle}`;
+      if (w.dataset.key === key) continue;
+      w.dataset.key = key;
+      w.dataset.href = href;
+      const m = href.match(/#\/project\/(\d+)/);
+      const pid = m ? m[1] : '';
+      const moved = pid !== w.dataset.pid;
+      // Use the page's own title once the window has moved to another case (or page),
+      // and keep updating it as that page finishes loading its name.
+      if (moved) { w.dataset.pid = pid; w.dataset.auto = '1'; }
+      if (w.dataset.auto === '1' && docTitle) {
+        const title = frameTitle(docTitle) || (pid ? `Case ${pid}` : 'Filevine');
+        if (title !== w.dataset.title) {
+          w.dataset.title = title;
+          w.setAttribute('aria-label', title);
+          w.querySelector('.pd9-win-title').textContent = title;
+          frame.title = title;
+        }
+      }
+      changed = true;
+    }
+    if (changed) { drawTaskbar(); saveWindows(); }
+  }
+  setInterval(() => { if (!IN_FRAME && document.querySelector('.pd9-win')) syncWindowTitles(); }, 1000);
+
+  // Clicking inside a case window (its frame) brings that window to the front.
+  window.addEventListener('blur', () => {
+    setTimeout(() => {
+      const f = document.activeElement;
+      const w = f && f.tagName === 'IFRAME' && f.closest('.pd9-win');
+      if (w && !w.classList.contains('pd9-win-focus')) focusWindow(w);
+    }, 0);
+  });
+
+  let windowsRestored = false;
+  function keepCaseWindows() {
+    if (windowsRestored) return;
+    windowsRestored = true;
+    winState().sort((a, b) => (a.z || 0) - (b.z || 0)).forEach((x) => openCaseWindow(x.id, x.title, x));
+    const top = [...document.querySelectorAll('.pd9-win:not(.pd9-win-spare):not(.pd9-win-min)')].sort((a, b) => b.style.zIndex - a.style.zIndex)[0];
+    if (top) focusWindow(top);
+  }
+
+  // ---------- Share real activity across Filevine tabs ----------
+  // Filevine can log you out of the whole session because one tab sat idle, even
+  // while you were busy in another. When you really type, click, or scroll in
+  // any Filevine tab, every other Filevine tab is told you're active. If you step
+  // away from all of them, the timeout still works exactly as your office set it.
+  const ACTIVE_KEY = 'pd9-last-real-activity';
+  let lastShared = 0;
+  const shareActivity = (e) => {
+    if (!e.isTrusted) return; // only real activity from you, never our own nudges
+    const now = Date.now();
+    if (now - lastShared < 15000) return; // at most every 15 seconds
+    lastShared = now;
+    try { localStorage.setItem(ACTIVE_KEY, String(now)); } catch (err) { /* ignore */ }
+  };
+  ['keydown', 'pointerdown', 'wheel', 'touchstart'].forEach((t) => window.addEventListener(t, shareActivity, { capture: true, passive: true }));
+  let lastMove = 0;
+  window.addEventListener('mousemove', (e) => { if (Date.now() - lastMove > 5000) { lastMove = Date.now(); shareActivity(e); } }, { capture: true, passive: true });
+
+  // Another tab saw you: let this tab's idle timer know too. Uses harmless events
+  // (mouse move and scroll) that don't click or type anything.
+  let lastNudge = 0;
+  window.addEventListener('storage', (e) => {
+    if (e.key !== ACTIVE_KEY || !e.newValue) return;
+    if (Date.now() - +e.newValue > 60000 || Date.now() - lastNudge < 15000) return;
+    lastNudge = Date.now();
+    const opts = { bubbles: true, cancelable: false, view: window, clientX: 1, clientY: 1 };
+    document.dispatchEvent(new MouseEvent('mousemove', opts));
+    window.dispatchEvent(new MouseEvent('mousemove', opts));
+    document.dispatchEvent(new Event('scroll', { bubbles: true }));
+  });
+
+  // ---------- Add a note or task to several cases at once ----------
+  // How it works: for each case, a small window loads that case's page, and the
+  // script fills in Filevine's own note or task box there and clicks Save, the
+  // same as you would. So every activity is created exactly like one made by
+  // hand in the Activity tab: same fields, tags, due date, and author.
+  // One case at a time, with a live view of each and a ✓ or ✗ when it's done.
+  const BULK_FRAME = 'pd9-bulk-worker';
+
+  function openBulkComposer(type, cases) {
+    if (!cases.length) return;
+    document.querySelectorAll('.pd9-bulk-modal').forEach((m) => m.remove());
+    const overlay = document.createElement('div');
+    overlay.className = 'pd9-overlay pd9-bulk-modal';
+    const knownTags = [...new Set((hubTable && hubTable.rows || []).flatMap((r) => r.tags.map((t) => t.name.replace(/^#/, ''))))].sort();
+    overlay.innerHTML = `
+      <div class="pd9-dialog pd9-bulk-dialog" role="dialog" aria-modal="true" aria-labelledby="pd9-bulk-title">
+        <div class="pd9-bc-head">
+          <div class="pd9-bc-types" role="tablist" aria-label="Activity type">
+            <button type="button" role="tab" data-type="note" title="Note"><svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M5 4h10l4 4v12H5z M15 4v4h4 M8 12h8 M8 16h6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round"/></svg></button>
+            <button type="button" role="tab" data-type="task" title="Task"><svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><rect x="4" y="4" width="16" height="16" rx="3" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M8 12.5l2.5 2.5L16 9.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+          </div>
+          <h2 id="pd9-bulk-title"></h2>
+          <button type="button" class="pd9-x" aria-label="Close"><svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></button>
+        </div>
+        <div class="pd9-bc-cases"></div>
+        <div class="pd9-bc-form">
+          <div class="pd9-bc-tpls"><span class="pd9-bc-label">Templates:</span></div>
+          <label class="pd9-bc-field"><span class="pd9-bc-label">Subject</span><input type="text" name="subject" autocomplete="off"></label>
+          <label class="pd9-bc-field"><span class="pd9-bc-label">Message</span><textarea name="body" rows="8" placeholder="Type your note. #hashtags become tags."></textarea></label>
+          <div class="pd9-bc-field"><span class="pd9-bc-label">Tags</span><div class="pd9-bc-tags"><input type="text" name="tag" list="pd9-bc-taglist" placeholder="Add a tag and press Enter" autocomplete="off"></div>
+            <datalist id="pd9-bc-taglist">${knownTags.map((t) => `<option value="${escapeAttr(t)}">`).join('')}</datalist></div>
+          <div class="pd9-bc-task">
+            <label class="pd9-bc-field"><span class="pd9-bc-label">Due date</span><input type="date" name="due"></label>
+            <p class="pd9-bc-note">Assigned the way Filevine assigns a new task (usually to you).</p>
+          </div>
+        </div>
+        <div class="pd9-bc-run" hidden>
+          <ol class="pd9-bc-list"></ol>
+          <div class="pd9-bc-live"><span class="pd9-bc-label">Working in:</span><div class="pd9-bc-frame"></div></div>
+        </div>
+        <div class="pd9-foot">
+          <span class="pd9-bc-hint">Ctrl+Enter to save</span><span class="pd9-grow"></span>
+          <button type="button" class="pd9-btn pd9-bc-cancel">Cancel</button>
+          <button type="button" class="pd9-btn pd9-primary pd9-bc-go"></button>
+        </div>
+      </div>`;
+    document.body.appendChild(overlay);
+    const q = (sel) => overlay.querySelector(sel);
+    let kind = type;
+    let running = false;
+    let stopAsked = false;
+    const tags = [];
+
+    // Default due date: next business day, like the T shortcut.
+    const d0 = dueDateString().split('/');
+    q('[name=due]').value = `${d0[2]}-${d0[0]}-${d0[1]}`;
+
+    const caseList = q('.pd9-bc-cases');
+    caseList.innerHTML = '<span class="pd9-bc-label">Cases:</span>';
+    cases.forEach((c) => {
+      const chip = document.createElement('span');
+      chip.className = 'pd9-bc-case';
+      chip.textContent = `${c.caseNo}  ${c.defendant || c.clientName || ''}`.trim();
+      caseList.appendChild(chip);
+    });
+
+    const setKind = (k) => {
+      kind = k;
+      overlay.querySelectorAll('.pd9-bc-types button').forEach((b) => {
+        const on = b.dataset.type === k;
+        b.setAttribute('aria-selected', String(on));
+        b.classList.toggle('pd9-on', on);
+      });
+      q('.pd9-bc-task').hidden = k !== 'task';
+      q('h2').textContent = `New ${k} in ${cases.length} case${cases.length === 1 ? '' : 's'}`;
+      q('.pd9-bc-go').textContent = `Save to ${cases.length} case${cases.length === 1 ? '' : 's'}`;
+    };
+    overlay.querySelectorAll('.pd9-bc-types button').forEach((b) => b.addEventListener('click', () => { if (!running) setKind(b.dataset.type); }));
+    setKind(type);
+
+    // Templates, same as the note box.
+    for (const tpl of TEMPLATES) {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'pd9-bc-tpl';
+      b.textContent = tpl.label;
+      b.addEventListener('click', () => {
+        const body = q('[name=body]');
+        if ((body.value.trim() || q('[name=subject]').value.trim()) && !confirm('Replace what is already in the box?')) return;
+        q('[name=subject]').value = tpl.subject;
+        const text = tpl.body.replace(/\{date\}/g, new Date().toLocaleDateString());
+        const at = text.indexOf('{|}');
+        body.value = text.replace('{|}', '');
+        if (tpl.tag) addTag(tpl.tag);
+        body.focus();
+        body.setSelectionRange(at < 0 ? body.value.length : at, at < 0 ? body.value.length : at);
+      });
+      q('.pd9-bc-tpls').appendChild(b);
+    }
+
+    // Tags as chips.
+    const tagBox = q('.pd9-bc-tags');
+    const tagInput = q('[name=tag]');
+    function drawTags() {
+      tagBox.querySelectorAll('.pd9-bc-chip').forEach((c) => c.remove());
+      tags.forEach((t) => {
+        const c = document.createElement('span');
+        c.className = 'pd9-bc-chip';
+        c.textContent = `#${t}`;
+        const x = document.createElement('button');
+        x.type = 'button';
+        x.setAttribute('aria-label', `Remove ${t}`);
+        x.textContent = '\u2715';
+        x.addEventListener('click', () => { tags.splice(tags.indexOf(t), 1); drawTags(); });
+        c.appendChild(x);
+        tagBox.insertBefore(c, tagInput);
+      });
+    }
+    function addTag(raw) {
+      const t = String(raw).trim().replace(/^#+/, '').replace(/\s+/g, '');
+      if (t && !tags.some((x) => x.toLowerCase() === t.toLowerCase())) { tags.push(t); drawTags(); }
+    }
+    tagInput.addEventListener('keydown', (e) => {
+      if ((e.key === 'Enter' || e.key === ',' || e.key === ' ') && tagInput.value.trim()) { e.preventDefault(); addTag(tagInput.value); tagInput.value = ''; }
+      else if (e.key === 'Backspace' && !tagInput.value && tags.length) { tags.pop(); drawTags(); }
+    });
+    tagInput.addEventListener('change', () => { if (tagInput.value.trim()) { addTag(tagInput.value); tagInput.value = ''; } });
+
+    const close = () => {
+      if (running && !confirm('Stop after the case it is working on now?')) return;
+      stopAsked = true;
+      overlay.remove();
+      document.removeEventListener('keydown', onKey, true);
+    };
+    const onKey = (e) => {
+      if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); close(); }
+      if (e.key === 'Enter' && (e.ctrlKey || e.metaKey) && !running) { e.preventDefault(); e.stopPropagation(); go(); }
+    };
+    document.addEventListener('keydown', onKey, true);
+    q('.pd9-x').addEventListener('click', close);
+    q('.pd9-bc-cancel').addEventListener('click', close);
+    q('.pd9-bc-go').addEventListener('click', () => go());
+    q(kind === 'task' ? '[name=subject]' : '[name=body]').focus();
+
+    let finished = false;
+    async function go() {
+      if (running || finished) return; // after a run, the button becomes Done or Retry instead
+      if (tagInput.value.trim()) { addTag(tagInput.value); tagInput.value = ''; }
+      const subject = q('[name=subject]').value.trim();
+      const body = q('[name=body]').value.replace(/\s+$/, '');
+      if (!body && !subject) { toast('Type a subject or a message first.'); return; }
+      const dueIso = q('[name=due]').value; // yyyy-mm-dd
+      const due = kind === 'task' && dueIso ? `${dueIso.slice(5, 7)}/${dueIso.slice(8, 10)}/${dueIso.slice(0, 4)}` : '';
+      const job = { type: kind, subject, body, tags: tags.slice(), due };
+
+      running = true;
+      stopAsked = false;
+      q('.pd9-bc-form').hidden = true;
+      q('.pd9-bc-cases').hidden = true;
+      q('.pd9-bc-run').hidden = false;
+      q('.pd9-bc-go').disabled = true;
+      q('.pd9-bc-go').textContent = 'Saving...';
+      q('.pd9-bc-cancel').textContent = 'Stop';
+      overlay.querySelectorAll('.pd9-bc-types button').forEach((b) => { b.disabled = true; });
+
+      const list = q('.pd9-bc-list');
+      list.textContent = '';
+      const items = cases.map((c) => {
+        const li = document.createElement('li');
+        li.className = 'pd9-bc-item pd9-wait';
+        li.innerHTML = '<span class="pd9-bc-state" aria-hidden="true"></span><a target="_blank" rel="noopener"></a><span class="pd9-bc-msg">Waiting</span>';
+        const a = li.querySelector('a');
+        a.href = `#/project/${encodeURIComponent(c.id)}/activity`;
+        a.textContent = `${c.caseNo}  ${c.defendant || c.clientName || ''}`.trim();
+        list.appendChild(li);
+        return { c, li };
+      });
+
+      let ok = 0, bad = 0;
+      for (const it of items) {
+        if (stopAsked || !overlay.isConnected) { it.li.className = 'pd9-bc-item pd9-skip'; it.li.querySelector('.pd9-bc-msg').textContent = 'Not done (stopped)'; continue; }
+        it.li.className = 'pd9-bc-item pd9-busy';
+        it.li.querySelector('.pd9-bc-msg').textContent = 'Opening the case...';
+        it.li.scrollIntoView({ block: 'nearest' });
+        const res = await runInCase(it.c.id, { ...job, caseNo: it.c.caseNo }, q('.pd9-bc-frame'), (msg) => { it.li.querySelector('.pd9-bc-msg').textContent = msg; });
+        it.li.className = `pd9-bc-item ${res.ok ? 'pd9-ok' : 'pd9-bad'}`;
+        it.li.querySelector('.pd9-bc-msg').textContent = res.ok ? 'Saved' : `Not saved: ${res.error}`;
+        if (res.ok) ok++; else bad++;
+      }
+      running = false;
+      finished = true;
+      if (!overlay.isConnected) return;
+      q('.pd9-bc-frame').textContent = '';
+      q('.pd9-bc-live').hidden = true;
+      q('.pd9-bc-cancel').textContent = 'Close';
+      const go2 = q('.pd9-bc-go');
+      go2.disabled = false;
+      if (bad) {
+        go2.textContent = `Retry ${bad} not saved`;
+        go2.onclick = (e) => {
+          e.stopImmediatePropagation();
+          const failed = items.filter((it) => !it.li.classList.contains('pd9-ok')).map((it) => it.c);
+          overlay.remove();
+          document.removeEventListener('keydown', onKey, true);
+          openBulkComposer(job.type, failed);
+          const m = document.querySelector('.pd9-bulk-modal');
+          if (m) { m.querySelector('[name=subject]').value = job.subject; m.querySelector('[name=body]').value = job.body; }
+        };
+      } else {
+        go2.textContent = 'Done';
+        go2.onclick = (e) => { e.stopImmediatePropagation(); close(); };
+        bulkPicked.clear();
+        const ov = document.getElementById('pd9-hub-sorted');
+        if (ov) drawOwnTable(ov);
+      }
+      toast(`${ok} saved${bad ? `, ${bad} not saved` : ''}.`);
+    }
+  }
+
+  // Load one case in a small window and ask the script running there to do the work.
+  // The same window is reused for the next case (it just switches cases), so only
+  // the first case pays for starting Filevine.
+  function runInCase(projectId, job, holder, say) {
+    return new Promise((resolve) => {
+      let frame = holder.querySelector('iframe');
+      const url = `#/project/${encodeURIComponent(projectId)}/activity`;
+      let done = false;
+      const finish = (res) => {
+        if (done) return;
+        done = true;
+        window.removeEventListener('message', onMsg);
+        clearTimeout(timer);
+        resolve(res);
+      };
+      const onMsg = (e) => {
+        if (!frame || e.source !== frame.contentWindow || e.origin !== location.origin || !e.data || !e.data.pd9bulk) return;
+        const m = e.data;
+        if (m.pd9bulk === 'ready' && String(m.pid) === String(projectId)) frame.contentWindow.postMessage({ pd9bulk: 'go', job }, location.origin);
+        else if (m.pd9bulk === 'progress') say(m.text);
+        else if (m.pd9bulk === 'done') finish({ ok: !!m.ok, error: m.error || '' });
+      };
+      window.addEventListener('message', onMsg);
+      const timer = setTimeout(() => finish({ ok: false, error: 'the case took too long to load' }), 60000);
+      if (frame) {
+        try { frame.contentWindow.location.hash = url; } catch (e) { frame.src = location.origin + location.pathname + url; }
+      } else {
+        frame = document.createElement('iframe');
+        frame.name = BULK_FRAME;
+        frame.title = 'Working in this case';
+        frame.src = location.origin + location.pathname + url;
+        holder.appendChild(frame);
+      }
+    });
+  }
+
+
+  // Inside the worker window: fill Filevine's own box and save.
+  if (IN_FRAME && window.name === BULK_FRAME) {
+    const tell = (m) => { try { window.parent.postMessage({ pd9bulk: m.type, ...m.data }, location.origin); } catch (e) { /* ignore */ } };
+    window.addEventListener('message', async (e) => {
+      if (e.source !== window.parent || e.origin !== location.origin || !e.data || e.data.pd9bulk !== 'go') return;
+      const job = e.data.job;
+      try {
+        // Safety check: never type into the wrong case. The page title must show this case number.
+        const plain = (t) => String(t || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+        if (job.caseNo && !(await waitFor(() => plain(document.title).includes(plain(job.caseNo)), 20000))) {
+          throw new Error('the case page did not switch to this case');
+        }
+        tell({ type: 'progress', data: { text: `Opening the ${job.type} box...` } });
+        const form = await openFloating(job.type);
+        if (!form) throw new Error(`the ${job.type} box did not open`);
+        if (job.type === 'task' && !(await waitFor(() => $(SEL.dueDate, form), 4000))) throw new Error('the task fields did not appear');
+        await sleep(job.type === 'task' ? 900 : 200); // let the default due date settle first
+
+        tell({ type: 'progress', data: { text: 'Filling it in...' } });
+        const subj = $(SEL.subject, form);
+        if (subj && job.subject) setInputValue(subj, job.subject);
+        // Tags go at the bottom as hashtags, which Filevine turns into tags (same as the templates).
+        const tagLine = job.tags.length ? `\n\n${job.tags.map((t) => `#${t}`).join(' ')} ` : '';
+        const text = (job.body || '') + tagLine;
+        if (text.trim()) {
+          const liveBox = () => $(SEL.message, form);
+          const landed = await fillMessage(liveBox(), text, liveBox);
+          if (!landed) throw new Error('the message did not go in');
+        }
+        if (job.type === 'task' && job.due) {
+          let stuck = false;
+          for (let attempt = 0; attempt < 3 && !stuck; attempt++) {
+            const input = $(SEL.dueDate, form);
+            if (!input) break;
+            input.focus();
+            input.select();
+            document.execCommand('insertText', false, job.due);
+            if (input.value !== job.due) setInputValue(input, job.due);
+            input.dispatchEvent(new Event('change', { bubbles: true }));
+            const box = $(SEL.message, form);
+            if (box) box.focus(); else input.blur();
+            await sleep(500);
+            stuck = ($(SEL.dueDate, form) || {}).value === job.due;
+          }
+          if (!stuck) throw new Error('the due date would not set');
+        }
+        await sleep(500); // give Filevine a moment to turn hashtags into tags
+
+        tell({ type: 'progress', data: { text: 'Saving...' } });
+        const save = await waitFor(() => { const b = findSaveButton(form); return b && !b.disabled ? b : null; }, 5000);
+        if (!save) throw new Error('the Save button was not ready');
+        save.click();
+        // Saved when Filevine empties or closes the box.
+        const saved = await waitFor(() => {
+          const box = $(SEL.message, form);
+          return !document.contains(form) || !box || !isVisible(box) || !box.textContent.trim();
+        }, 15000);
+        if (!saved) throw new Error('Filevine did not confirm the save');
+        try { localStorage.removeItem(draftKey(form)); } catch (err) { /* ignore */ }
+        tell({ type: 'done', data: { ok: true } });
+      } catch (err) {
+        tell({ type: 'done', data: { ok: false, error: err.message || String(err) } });
+      }
+    });
+    // Say we're ready once the case page can make activities. Again each time
+    // the window is switched to another case.
+    let announcing = 0;
+    const announce = async () => {
+      const mine = ++announcing;
+      await sleep(300);
+      const pid = (location.hash.match(/\/project\/(\d+)/) || [])[1];
+      const ready = await waitFor(() => inCase() && $(SEL.createBtn), 45000);
+      if (mine !== announcing) return; // switched again meanwhile
+      tell(ready ? { type: 'ready', data: { pid } } : { type: 'done', data: { ok: false, error: 'the case page did not finish loading' } });
+    };
+    window.addEventListener('hashchange', announce);
+    announce();
+  }
+
+  // ---------- Case switcher (Ctrl+Space, or the Switch case button) ----------
+  // A Spotlight-style box. Type part of a name or a case number the short way
+  // (26cf1234, 2026cf1234, 261234, or just 1234) and press Enter to switch this
+  // tab (or this case window) to that case. Your cases come from the Project Hub,
+  // using the filters you last had there. Anything else falls back to Filevine's
+  // full search.
+  const SWITCH_PARAMS_KEY = 'pd9-switch-hub-filters';
+  const SWITCH_LIST_KEY = 'pd9-switch-case-list';
+  const RECENT_KEY = 'pd9-recent-cases';
+  let switchList = null; // [{ id, caseNo, name, c, lastActivity }]
+  let switchListAt = 0;
+
+  function rememberRecent(id) {
+    const list = (store.get(RECENT_KEY, null) || []).filter((x) => x !== String(id));
+    list.unshift(String(id));
+    store.set(RECENT_KEY, list.slice(0, 20));
+  }
+
+  // The case list is shared through Tampermonkey's storage: the Project Hub tab
+  // writes its PD9 table there, so every other tab (your case tab, case windows)
+  // searches it instantly, with no waiting on Filevine.
+  function readSwitchCache() {
+    if (onHub() && hubTable && hubTable.rows) { // on the Project Hub itself: use the table as it is right now
+      switchList = hubTable.rows.map(switchRow);
+      switchListAt = Date.now();
+      return;
+    }
+    const c = store.get(SWITCH_LIST_KEY, null);
+    if (c && c.rows && c.at > switchListAt) { switchList = c.rows; switchListAt = c.at; }
+  }
+  const switchRow = (r) => ({ id: r.id, caseNo: r.caseNo, name: r.clientName, last: r.defendant || '', lastActivity: r.lastActivity ? r.lastActivity.getTime() : 0 });
+  function publishSwitchList(rows) {
+    if (!rows || !rows.length) return;
+    switchList = rows.map(switchRow);
+    switchListAt = Date.now();
+    store.set(SWITCH_LIST_KEY, { at: switchListAt, rows: switchList });
+  }
+
+  // Ask Filevine for the list only when there's no fresh copy (older than 10 minutes).
+  async function loadSwitchList(force = false) {
+    readSwitchCache();
+    if (!force && switchList && Date.now() - switchListAt < 10 * 60 * 1000) return switchList;
+    const params = store.get(SWITCH_PARAMS_KEY, null);
+    if (!params) return switchList || [];
+    const rows = await loadHubList(params);
+    const old = new Map((switchList || []).map((r) => [r.id, r.last]));
+    rows.forEach((r) => { if (!r.defendant && old.get(r.id)) r.defendant = old.get(r.id); }); // keep names we already had
+    publishSwitchList(rows);
+    return switchList;
+  }
+
+
+  // How well a case matches what was typed. 0 = no match. Higher is better.
+  function switchScore(row, typed) {
+    const t = typed.trim();
+    if (!t) return 0;
+    const flat = t.toUpperCase().replace(/[\s\-_|]+/g, '');
+    const c = row.c || (row.c = readCaseNumbers(row.caseNo)[0] || null);
+    // Case number, typed the short way: 26CF1234, 2026CF1234, 26CF12 (still typing), 26CF1234A, 261234, 1234.
+    const m = flat.match(/^(\d{2}|\d{4})([A-Z]{1,2})(\d*)([A-Z]{0,3})$/);
+    if (m && c) {
+      const [, y, type, num, rest] = m;
+      if (twoDigitYear(y) !== c.year || !c.type.startsWith(type)) return 0;
+      if (rest && !(c.def + c.county).startsWith(rest)) return 0;
+      if (!num) return 40;
+      const n = stripZeros(num);
+      return c.num === n ? 100 : c.num.startsWith(n) ? 70 : 0;
+    }
+    if (/^\d{3,}$/.test(flat) && c) {
+      if (c.num === stripZeros(flat)) return 90;
+      if ((c.year + c.num) === flat || (c.year + c.num.padStart(6, '0')) === flat) return 100;
+      if (c.num.startsWith(stripZeros(flat))) return 60;
+      if ((c.year + c.num).startsWith(flat)) return 55;
+      return 0;
+    }
+    // Name: every typed word starts a word in the name, any order.
+    const want = nameWords(t);
+    const have = nameWords(`${row.name || ''} ${row.last || ''}`);
+    if (!want.length || !want.every((w) => have.some((h) => h.startsWith(w)))) return 0;
+    return 50 + (have[0] && have[0].startsWith(want[0]) ? 5 : 0);
+  }
+
+  function openSwitcher() {
+    if (document.getElementById('pd9-switch')) { document.querySelector('#pd9-switch input').select(); return; }
+    const back = document.createElement('div');
+    back.id = 'pd9-switch';
+    back.innerHTML = `
+      <div class="pd9-sw-panel" role="dialog" aria-modal="true" aria-label="Switch case">
+        <div class="pd9-sw-input">
+          <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5" fill="none" stroke="currentColor" stroke-width="2"/><path d="M15.5 15.5 20 20" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+          <input type="text" autocomplete="off" spellcheck="false" placeholder="Switch to a case: name or number (26cf1234)" role="combobox" aria-expanded="true" aria-controls="pd9-sw-list" aria-autocomplete="list">
+          <span class="pd9-sw-spin" hidden aria-hidden="true"></span>
+        </div>
+        <div class="pd9-sw-list" id="pd9-sw-list" role="listbox"></div>
+        <div class="pd9-sw-foot"><span><kbd>\u2191</kbd><kbd>\u2193</kbd> move</span><span><kbd>Enter</kbd> switch</span><span><kbd>${/Mac/i.test(navigator.platform) ? '\u2318' : 'Ctrl'}</kbd><kbd>Enter</kbd> new tab</span><span><kbd>Esc</kbd> close</span></div>
+      </div>`;
+    document.body.appendChild(back);
+    const input = back.querySelector('input');
+    const list = back.querySelector('.pd9-sw-list');
+    const spin = back.querySelector('.pd9-sw-spin');
+    let items = [];
+    let sel = 0;
+    let others = [];
+    let otherFor = '';
+    let otherTimer = null;
+    let otherReq = null;
+
+    const close = () => { back.remove(); document.removeEventListener('keydown', onKey, true); if (otherReq) otherReq.abort(); };
+    const go = (it, newTab) => {
+      if (!it) return;
+      const hash = `#/project/${encodeURIComponent(it.id)}/activity`;
+      close();
+      rememberRecent(it.id);
+      if (newTab) window.open(location.origin + location.pathname + hash, '_blank', 'noopener');
+      else location.hash = hash;
+    };
+
+    const nextLabel = (id) => {
+      const e = hubEvents && hubEvents.get(String(id));
+      return e ? `${niceDate(e.when, true)}${e.dateOnly ? '' : ` ${e.when.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}`}${e.title ? `  ${shortTitle(e.title)}` : ''}` : '';
+    };
+
+    const draw = () => {
+      const typed = input.value;
+      const rows = switchList || [];
+      let groups;
+      if (!typed.trim()) {
+        const recent = (store.get(RECENT_KEY, null) || []).map((id) => rows.find((r) => r.id === id)).filter(Boolean).slice(0, 6);
+        const soon = rows.filter((r) => hubEvents && hubEvents.get(r.id) && !recent.includes(r))
+          .sort((a, b) => hubEvents.get(a.id).when - hubEvents.get(b.id).when).slice(0, 6);
+        groups = [['Recent', recent], ['Coming up', soon]];
+      } else {
+        const scored = rows.map((r) => ({ r, s: switchScore(r, typed) })).filter((x) => x.s > 0)
+          .sort((a, b) => b.s - a.s || b.r.lastActivity - a.r.lastActivity).slice(0, 30).map((x) => x.r);
+        const mine = new Set(scored.map((r) => r.id));
+        groups = [['Your cases', scored], ['Other cases', others.filter((o) => !mine.has(o.id))]];
+      }
+      items = groups.flatMap(([, g]) => g);
+      sel = Math.min(sel, Math.max(0, items.length - 1));
+      list.textContent = '';
+      let i = 0;
+      for (const [title, g] of groups) {
+        if (!g.length) continue;
+        const h = document.createElement('div');
+        h.className = 'pd9-sw-group';
+        h.textContent = title;
+        list.appendChild(h);
+        for (const it of g) {
+          const idx = i++;
+          const row = document.createElement('div');
+          row.className = 'pd9-sw-row' + (idx === sel ? ' pd9-sw-sel' : '') + (String(it.id) === projectId() ? ' pd9-sw-here' : '');
+          row.setAttribute('role', 'option');
+          row.setAttribute('aria-selected', String(idx === sel));
+          row.id = `pd9-sw-${idx}`;
+          const cn = document.createElement('span'); cn.className = 'pd9-sw-case'; cn.textContent = it.caseNo || `Case ${it.id}`;
+          const nm = document.createElement('span'); nm.className = 'pd9-sw-name'; nm.textContent = it.last || it.name || '';
+          const nx = document.createElement('span'); nx.className = 'pd9-sw-next'; nx.textContent = String(it.id) === projectId() ? 'Open now' : nextLabel(it.id);
+          row.append(cn, nm, nx);
+          row.addEventListener('mousemove', () => { if (sel !== idx) { sel = idx; draw(); } });
+          row.addEventListener('click', (e) => go(it, e.ctrlKey || e.metaKey));
+          list.appendChild(row);
+        }
+      }
+      if (!items.length) {
+        const empty = document.createElement('div');
+        empty.className = 'pd9-sw-empty';
+        empty.textContent = !store.get(SWITCH_PARAMS_KEY, null) && !typed.trim()
+          ? 'Open the Project Hub once so I know which cases are yours. Typing still searches all of Filevine.'
+          : typed.trim() ? (otherFor === typed.trim() && !otherReq ? 'No matching cases.' : 'Searching...') : 'Start typing a name or case number.';
+        list.appendChild(empty);
+      }
+      input.setAttribute('aria-activedescendant', items.length ? `pd9-sw-${sel}` : '');
+      const cur = list.querySelector('.pd9-sw-sel');
+      if (cur) cur.scrollIntoView({ block: 'nearest' });
+    };
+
+    // Filevine's full search, for cases that aren't in your list (a beat after you stop typing).
+    const searchOthers = () => {
+      clearTimeout(otherTimer);
+      const typed = input.value.trim();
+      others = [];
+      otherFor = '';
+      if (otherReq) { otherReq.abort(); otherReq = null; }
+      if (typed.length < 3) { spin.hidden = true; draw(); return; }
+      const mineNow = (switchList || []).filter((r) => switchScore(r, typed) >= 90).length;
+      if (mineNow) { spin.hidden = true; otherFor = typed; draw(); return; } // an exact hit in your cases: no need to search everywhere
+      otherTimer = setTimeout(async () => {
+        const flat = typed.toUpperCase().replace(/[\s\-_|]+/g, '');
+        const isCase = /\d/.test(flat) && readCaseQuery(flat).length;
+        const ctrl = new AbortController();
+        otherReq = ctrl;
+        spin.hidden = false;
+        try {
+          const queries = isCase ? [caseSearchTerms(readCaseQuery(flat))] : SEARCH_MODES.name.queries(typed);
+          let hits = [];
+          for (const q of queries) {
+            hits = (await askFilevine(q, ctrl.signal)).filter((h) => h.id && (isCase ? titleFitsCase(h.title, flat) : nameFits(h, typed)));
+            if (hits.length) break;
+          }
+          if (otherReq !== ctrl) return;
+          others = hits.slice(0, 15).map((h) => ({ id: String(h.id), caseNo: (h.title.split('|')[1] || '').trim(), name: h.clientName || h.title.split('|')[0].trim() }));
+        } catch (e) { /* stopped or failed: show what we have */ }
+        if (otherReq === ctrl) { otherReq = null; otherFor = typed; spin.hidden = true; draw(); }
+      }, 450);
+    };
+
+    const onKey = (e) => {
+      if (!back.isConnected) return;
+      if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); close(); }
+      else if (e.key === 'ArrowDown') { e.preventDefault(); sel = Math.min(items.length - 1, sel + 1); draw(); }
+      else if (e.key === 'ArrowUp') { e.preventDefault(); sel = Math.max(0, sel - 1); draw(); }
+      else if (e.key === 'Enter') { e.preventDefault(); e.stopPropagation(); go(items[sel], e.ctrlKey || e.metaKey); }
+    };
+    document.addEventListener('keydown', onKey, true);
+    input.addEventListener('input', () => { sel = 0; draw(); searchOthers(); });
+    back.addEventListener('mousedown', (e) => { if (e.target === back) close(); });
+    readSwitchCache(); // instant: the Project Hub's list, no waiting on Filevine
+    input.focus();
+    draw();
+    loadHubEvents(); // next events (shared with the Project Hub column)
+    if (!switchList || Date.now() - switchListAt > 10 * 60 * 1000) {
+      spin.hidden = false; // refreshing an old list in the background; the old one stays searchable meanwhile
+      loadSwitchList(true).then(() => { if (back.isConnected) draw(); }).catch(() => {}).finally(() => { spin.hidden = true; });
+    }
+    const waitEvents = setInterval(() => { if (!back.isConnected) clearInterval(waitEvents); else if (hubEvents && !hubEventsLoading) { clearInterval(waitEvents); draw(); } }, 400);
+  }
+
+  // Ctrl+Space opens it (on a Mac too: Control, not Command), anywhere except while writing a note.
+  document.addEventListener('keydown', (e) => {
+    if (e.code !== 'Space' || !e.ctrlKey || e.metaKey || e.altKey || e.shiftKey) return;
+    if (composerOf(document.activeElement)) return; // leave the note box alone
+    e.preventDefault();
+    e.stopImmediatePropagation();
+    openSwitcher();
+  }, true);
+
+  function addSwitchButton() {
+    if (document.getElementById('pd9-switch-btn')) return;
+    const input = searchInput();
+    if (!input) return;
+    const host = document.getElementById('pd9-name-btn') || input.closest('.search') || input.closest('.fvs-autocomplete') || input.parentElement;
+    const btn = document.createElement('button');
+    btn.id = 'pd9-switch-btn';
+    btn.type = 'button';
+    btn.className = 'pd9-head-btn';
+    btn.title = 'Switch case (Ctrl+Space)';
+    btn.innerHTML = `<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="M7 7h11l-3-3M17 17H6l3 3" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg><span>Switch case</span><kbd class="pd9-kbd">${/Mac/i.test(navigator.platform) ? '\u2303Space' : 'Ctrl Space'}</kbd>`;
+    btn.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); openSwitcher(); });
+    host.after(btn);
+  }
+
+  // ---------- Esc closes the note/task box ----------
+  // Runs after Filevine's own Esc handling, so an open tag list or date picker
+  // closes first; the next Esc closes the box. Your text is kept as a draft,
+  // so "Restore note" brings it back.
+  document.addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape' || e.defaultPrevented || e.isComposing) return;
+    if (document.querySelector('.pd9-overlay, #pd9-switch')) return; // one of our windows is open: it handles Esc
+    const active = document.activeElement;
+    let form = composerOf(active);
+    if (!form) {
+      // Focus isn't in a box: close the floating one if it's open and nothing else is.
+      const docked = $(SEL.docked);
+      if (!docked || !isVisible($(SEL.message, docked)) || isTyping(e)) return;
+      form = docked;
+    }
+    const close = $(SEL.closeBtn, form);
+    if (!close) return;
+    e.preventDefault();
+    const box = $(SEL.message, form);
+    const subj = $(SEL.subject, form);
+    const hadText = (box && box.textContent.trim()) || (subj && subj.value.trim());
+    saveDraft(form);
+    close.click();
+    if (hadText) toast('Closed. Click "Restore note" to bring it back.');
+  });
+
   function decorate() {
     watchProject();
     addOptionsMenuItem();
     addCloseButton();
     addCloseHints();
-    addCaseSearchButton();
-    applyCaseFilter();
-    keepAdvanced();
+    if (!IN_FRAME) {
+      addCaseSearchButton();
+      applyCaseFilter();
+      keepAdvanced();
+      rewriteHubLinks();
+      showHubEvents();
+      showOwnTable();
+      keepCaseWindows();
+    }
     makeComposerMovable();
     addJailButton();
-    rewriteHubLinks();
+    addSwitchButton();
     for (const form of $$(COMPOSERS)) {
       const layout = $(SEL.layout, form);
       if (layout && !$('.fvqn-wrap', form)) layout.parentNode.insertBefore(buildBar(form), layout);
@@ -2789,9 +4503,256 @@
     .pd9-movable .header button, .pd9-movable .header [role="button"] { cursor: pointer; }
     .pd9-movable .note-input-wrapper { max-height: none !important; }
     .pd9-movable.pd9-dragging { opacity: .92; user-select: none; }
-    .fvqn-hk { margin-left: 6px; font-size: 10px; font-weight: 600; opacity: .6; letter-spacing: .02em; }
     .pd9-overlay .pd9-hk { float: right; font-size: 11px; font-weight: 600; opacity: .6; }
     .pd9-overlay .pd9-tagwrap .pd9-hk-clear { flex: none; }
+    /* PD9 (alternate) Project Hub table
+       Palette: ink #1d2433, slate #667085, line #e9ecf1, header #f8f9fb, accent #1f7a77, soon #c2410c.
+       Quiet rows; the one bold element is the Next Event date tile. */
+    #pd9-hub-sorted {
+      --ink: #1d2433; --slate: #667085; --line: #e9ecf1; --head: #f8f9fb; --accent: #1f7a77; --soon: #c2410c;
+      position: absolute; inset: 0; z-index: 50; display: flex; flex-direction: column;
+      background: #fff; color: var(--ink); font-family: var(--pd9-font, inherit); font-size: 14px;
+      border: 1px solid var(--line); border-radius: 10px; overflow: hidden;
+      font-variant-numeric: tabular-nums;
+    }
+    #pd9-hub-sorted .pd9-hs-bar { position: relative; display: flex; align-items: center; flex-wrap: wrap; row-gap: 4px; padding: 7px 14px; border-bottom: 1px solid var(--line); font-size: 13px; color: var(--slate); }
+    #pd9-hub-sorted .pd9-hs-track { position: absolute; left: 0; right: 0; bottom: -1px; height: 2px; }
+    #pd9-hub-sorted .pd9-hs-progress { display: block; height: 100%; width: 0; background: var(--accent); transition: width .3s ease; }
+    #pd9-hub-sorted .pd9-hs-progress[hidden] { display: none; }
+    #pd9-hub-sorted .pd9-hs-wrap { flex: 1; overflow: auto; }
+    #pd9-hub-sorted table { border-collapse: separate; border-spacing: 0; table-layout: fixed; min-width: 100%; }
+    #pd9-hub-sorted th {
+      position: sticky; top: 0; z-index: 1; height: 34px; padding: 0 14px; text-align: left; white-space: nowrap; overflow: hidden;
+      background: var(--head); color: var(--slate); font-size: 12px; font-weight: 600; letter-spacing: .01em;
+      border-bottom: 1px solid var(--line); cursor: grab;
+    }
+    #pd9-hub-sorted th.pd9-sorted { color: var(--ink); }
+    #pd9-hub-sorted th button { all: unset; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; max-width: 100%; }
+    #pd9-hub-sorted th button:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 3px; }
+    #pd9-hub-sorted .pd9-sort-arrow { font-size: 11px; opacity: 0; transition: opacity .15s; }
+    #pd9-hub-sorted th:hover .pd9-sort-arrow, #pd9-hub-sorted th.pd9-sorted .pd9-sort-arrow { opacity: 1; }
+    #pd9-hub-sorted th.pd9-sorted .pd9-sort-arrow { color: var(--accent); }
+    #pd9-hub-sorted .pd9-col-grip { position: absolute; top: 0; right: 0; width: 10px; height: 100%; cursor: col-resize; }
+    #pd9-hub-sorted .pd9-col-grip::after { content: ""; position: absolute; top: 30%; bottom: 30%; right: 4px; width: 2px; border-radius: 1px; background: var(--line); transition: background .15s; }
+    #pd9-hub-sorted th:hover .pd9-col-grip::after { background: #c9ced6; }
+    #pd9-hub-sorted .pd9-col-grip:hover::after { background: var(--accent); }
+    #pd9-hub-sorted th.pd9-dragging-col { opacity: .45; }
+    #pd9-hub-sorted th.pd9-drop-target { box-shadow: inset 2px 0 0 var(--accent); }
+    #pd9-hub-sorted td {
+      height: 44px; padding: 0 14px; vertical-align: middle; border-bottom: 1px solid var(--line);
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    #pd9-hub-sorted tbody tr { transition: background .12s; }
+    #pd9-hub-sorted tbody tr:nth-child(even) { background: #fafbfc; } /* subtle every-other-row shading */
+    #pd9-hub-sorted tbody tr:hover { background: #eef6f6; }
+    #pd9-hub-sorted tbody tr:hover td:first-child { box-shadow: inset 2px 0 0 var(--accent); }
+    #pd9-hub-sorted tbody tr:last-child td { border-bottom: 0; }
+    #pd9-hub-sorted td a { color: var(--accent); font-weight: 600; text-decoration: none; }
+    #pd9-hub-sorted td a:hover { text-decoration: underline; text-underline-offset: 3px; }
+    #pd9-hub-sorted td a:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 3px; }
+    #pd9-hub-sorted td[data-key="defendant"] { font-weight: 500; }
+    #pd9-hub-sorted td[data-key="lastActivity"], #pd9-hub-sorted td[data-key="event"] { color: var(--slate); }
+    #pd9-hub-sorted .pd9-own-pending { color: var(--slate); font-weight: 400; }
+    /* The date tile */
+    #pd9-hub-sorted .pd9-when { display: inline-flex; flex-direction: column; line-height: 1.15; padding-left: 8px; border-left: 3px solid var(--line); }
+    #pd9-hub-sorted .pd9-when-day { font-weight: 600; color: var(--ink); }
+    #pd9-hub-sorted .pd9-when-time { font-size: 11.5px; color: var(--slate); }
+    #pd9-hub-sorted .pd9-when.pd9-soon { border-left-color: var(--soon); }
+    #pd9-hub-sorted .pd9-when.pd9-soon .pd9-when-day { color: var(--soon); }
+    #pd9-hub-sorted .pd9-none { font-size: 13px; color: #98a2b3; }
+    #pd9-hub-sorted .pd9-skel-line { display: block; width: 70%; height: 10px; border-radius: 5px; background: linear-gradient(90deg, #eef0f3 25%, #f6f7f9 50%, #eef0f3 75%); background-size: 200% 100%; animation: pd9Skel 1.2s linear infinite; }
+    /* Tags */
+    #pd9-hub-sorted .pd9-own-tags { white-space: nowrap; line-height: 1.5; }
+    #pd9-hub-sorted .pd9-tag {
+      display: inline-block; margin: 0 4px 0 0; padding: 1px 8px; border-radius: 6px; font-size: 11.5px; font-weight: 600; line-height: 1.6;
+      color: color-mix(in srgb, var(--pd9-tag, var(--accent)) 85%, #000);
+      background: color-mix(in srgb, var(--pd9-tag, var(--accent)) 12%, #fff);
+      box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--pd9-tag, var(--accent)) 22%, transparent);
+    }
+    /* Tag filter */
+    #pd9-hub-sorted button.pd9-tag { border: 0; font-family: inherit; cursor: pointer; }
+    #pd9-hub-sorted button.pd9-tag:hover { box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--pd9-tag, var(--accent)) 55%, transparent); }
+    #pd9-hub-sorted .pd9-tag.pd9-tag-on { color: #fff; background: color-mix(in srgb, var(--pd9-tag, var(--accent)) 88%, #000); box-shadow: none; }
+    #pd9-hub-sorted button.pd9-tag:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+    #pd9-hub-sorted .pd9-tag-funnel { all: unset; display: inline-flex; align-items: center; gap: 3px; margin-left: 8px; padding: 2px 5px; border-radius: 5px; color: var(--slate); cursor: pointer; font-size: 11px; font-weight: 700; vertical-align: middle; }
+    #pd9-hub-sorted .pd9-tag-funnel:hover { background: rgba(16, 24, 40, .06); color: var(--ink); }
+    #pd9-hub-sorted .pd9-tag-funnel.pd9-funnel-on { color: var(--accent); background: #e3f1f0; }
+    #pd9-hub-sorted .pd9-tag-funnel:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+    #pd9-hub-sorted .pd9-hs-filters { display: inline-flex; align-items: center; gap: 6px; margin-left: 14px; flex-wrap: wrap; }
+    #pd9-hub-sorted .pd9-hs-lead { color: var(--slate); }
+    #pd9-hub-sorted .pd9-hs-chip { border: 0; padding: 2px 6px 2px 9px; border-radius: 6px; background: #e3f1f0; color: #155e5b; font: inherit; font-size: 12px; font-weight: 600; cursor: pointer; }
+    #pd9-hub-sorted .pd9-hs-chip::after { content: "✕"; margin-left: 6px; font-size: 10px; opacity: .6; }
+    #pd9-hub-sorted .pd9-hs-chip:hover::after { opacity: 1; }
+    #pd9-hub-sorted .pd9-hs-clear { border: 0; background: none; padding: 2px 4px; color: var(--accent); font: inherit; font-size: 12px; font-weight: 600; cursor: pointer; text-decoration: underline; text-underline-offset: 3px; }
+    #pd9-hub-sorted .pd9-tag-menu {
+      position: absolute; z-index: 5; width: 280px; max-height: 360px; display: flex; flex-direction: column; background: #fff; border-radius: 10px;
+      box-shadow: 0 0 0 1px rgba(16, 24, 40, .1), 0 16px 36px -12px rgba(16, 24, 40, .35); font-size: 13px;
+    }
+    #pd9-hub-sorted .pd9-tm-head { display: flex; gap: 6px; padding: 8px; border-bottom: 1px solid var(--line); }
+    #pd9-hub-sorted .pd9-tm-find { flex: 1; min-width: 0; padding: 5px 8px; border: 1px solid #d0d5dd; border-radius: 6px; font: inherit; font-size: 13px; }
+    #pd9-hub-sorted .pd9-tm-find:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+    #pd9-hub-sorted .pd9-tm-mode { display: inline-flex; padding: 2px; background: #f2f4f7; border-radius: 7px; }
+    #pd9-hub-sorted .pd9-tm-mode button { border: 0; padding: 3px 9px; border-radius: 5px; background: none; color: var(--slate); font: inherit; font-size: 12px; font-weight: 600; cursor: pointer; }
+    #pd9-hub-sorted .pd9-tm-mode button[aria-checked="true"] { background: #fff; color: var(--ink); box-shadow: 0 1px 2px rgba(16, 24, 40, .12); }
+    #pd9-hub-sorted .pd9-tm-list { overflow: auto; padding: 4px; }
+    #pd9-hub-sorted .pd9-tm-row { display: flex; align-items: center; gap: 8px; padding: 5px 6px; border-radius: 6px; cursor: pointer; }
+    #pd9-hub-sorted .pd9-tm-row:hover { background: #f5f9f9; }
+    #pd9-hub-sorted .pd9-tm-row input { width: 15px; height: 15px; margin: 0; accent-color: var(--accent); }
+    #pd9-hub-sorted .pd9-tm-count { margin-left: auto; color: var(--slate); font-size: 12px; }
+    #pd9-hub-sorted .pd9-tm-empty { margin: 10px; color: var(--slate); }
+    #pd9-hub-sorted .pd9-tm-foot { display: flex; justify-content: flex-end; padding: 6px 8px; border-top: 1px solid var(--line); }
+    #pd9-hub-sorted .pd9-tm-clear { border: 0; background: none; color: var(--accent); font: inherit; font-size: 12px; font-weight: 600; cursor: pointer; }
+    @media (prefers-reduced-motion: reduce) { #pd9-hub-sorted *, #pd9-hub-sorted .pd9-skel-line { transition: none !important; animation: none !important; } }
+    .pd9-hub-toggle-plain { display: inline-flex; align-items: center; gap: 6px; margin: 0 0 8px; font-size: 13px; font-weight: 600; cursor: pointer; user-select: none; }
+    .pd9-hub-toggle-plain input { width: 16px; height: 16px; margin: 0; }
+    #pd9-hub-sorted td a { color: #2b7a78; text-decoration: none; }
+    #pd9-hub-sorted td a:hover { text-decoration: underline; }
+    /* Project Hub: Next Event column */
+    .ag-cell[col-id="pd9NextEvent"], .ag-cell[col-id="pd9NextTitle"] { display: flex; align-items: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    /* Window mode: case windows and the bar at the bottom */
+    .pd9-win {
+      position: fixed; z-index: 100010; display: flex; flex-direction: column; min-width: 360px; min-height: 240px;
+      background: #fff; border-radius: 10px; overflow: hidden;
+      box-shadow: 0 0 0 1px rgba(16, 24, 40, .12), 0 18px 40px -12px rgba(16, 24, 40, .35);
+    }
+    .pd9-win.pd9-win-focus { box-shadow: 0 0 0 1px rgba(31, 122, 119, .55), 0 24px 52px -14px rgba(16, 24, 40, .45); }
+    .pd9-win.pd9-win-min { display: none; }
+    .pd9-win.pd9-win-spare { left: -20000px !important; top: 0 !important; visibility: hidden; pointer-events: none; }
+    .pd9-win.pd9-win-max { left: 8px !important; top: 8px !important; right: 8px; bottom: 52px; width: auto !important; height: auto !important; }
+    .pd9-win-head { display: flex; align-items: center; gap: 2px; height: 36px; padding: 0 6px 0 14px; background: #f8f9fb; border-bottom: 1px solid #e9ecf1; cursor: move; user-select: none; touch-action: none; }
+    .pd9-win-focus .pd9-win-head { background: #eef6f6; }
+    .pd9-win-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; font-weight: 600; color: #1d2433; }
+    .pd9-win-btn { display: grid; place-items: center; width: 28px; height: 28px; border: 0; border-radius: 6px; background: none; color: #667085; cursor: pointer; }
+    .pd9-win-btn:hover { background: rgba(16, 24, 40, .07); color: #1d2433; }
+    .pd9-win-x:hover { background: #fee4e2; color: #b42318; }
+    .pd9-win-btn:focus-visible { outline: 2px solid #1f7a77; outline-offset: 1px; }
+    .pd9-win-body { position: relative; flex: 1; }
+    .pd9-win-body iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; background: #fff; }
+    .pd9-win-busy .pd9-win-body iframe { pointer-events: none; }
+    .pd9-win-busy, .pd9-win-busy * { user-select: none !important; }
+    .pd9-win-grip { position: absolute; right: 0; bottom: 0; width: 18px; height: 18px; cursor: nwse-resize;
+      background: linear-gradient(135deg, transparent 50%, #c9ced6 50%, #c9ced6 58%, transparent 58%, transparent 70%, #c9ced6 70%, #c9ced6 78%, transparent 78%); }
+    .pd9-win-max .pd9-win-grip { display: none; }
+    #pd9-taskbar {
+      position: fixed; left: 50%; bottom: 8px; transform: translateX(-50%); z-index: 2147483000; display: flex; gap: 6px; padding: 6px;
+      max-width: calc(100vw - 32px); overflow-x: auto; background: rgba(255, 255, 255, .92); backdrop-filter: blur(8px);
+      border-radius: 12px; box-shadow: 0 0 0 1px rgba(16, 24, 40, .1), 0 10px 30px -10px rgba(16, 24, 40, .4);
+    }
+    #pd9-taskbar[hidden] { display: none; }
+    .pd9-task-home { flex: none; display: grid; place-items: center; width: 32px; height: 30px; border: 0; border-radius: 8px; background: transparent; color: #475467; cursor: pointer; }
+    .pd9-task-home:hover { background: rgba(16, 24, 40, .07); color: #1d2433; }
+    .pd9-task-sep { flex: none; width: 1px; margin: 4px 2px; background: #e4e7ec; }
+    .pd9-task { flex: none; display: inline-flex; align-items: center; max-width: 260px; border-radius: 8px; color: #1d2433; }
+    .pd9-task:hover { background: rgba(16, 24, 40, .06); }
+    .pd9-task.pd9-task-active { background: #e3f1f0; color: #155e5b; box-shadow: inset 0 -2px 0 #1f7a77; }
+    .pd9-task.pd9-task-min { color: #667085; }
+    .pd9-task-name { min-width: 0; padding: 6px 4px 6px 12px; border: 0; background: none; color: inherit; font: inherit; font-size: 12.5px; font-weight: 600;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: pointer; }
+    .pd9-task-min .pd9-task-name { font-weight: 500; }
+    .pd9-task-x { flex: none; display: grid; place-items: center; width: 22px; height: 22px; margin-right: 4px; border: 0; border-radius: 6px;
+      background: none; color: inherit; opacity: .45; cursor: pointer; }
+    .pd9-task:hover .pd9-task-x { opacity: .8; }
+    .pd9-task-x:hover { opacity: 1; background: #fee4e2; color: #b42318; }
+    .pd9-task-home:focus-visible, .pd9-task-name:focus-visible, .pd9-task-x:focus-visible { outline: 2px solid #1f7a77; outline-offset: 1px; }
+    /* Selecting cases in the PD9 table */
+    #pd9-hub-sorted .pd9-pick { width: 40px; padding: 0 0 0 14px !important; text-align: left; cursor: default; }
+    #pd9-hub-sorted .pd9-pick input { width: 15px; height: 15px; margin: 0; accent-color: var(--accent); cursor: pointer; vertical-align: middle; }
+    #pd9-hub-sorted tbody tr.pd9-picked { background: #e8f3f2 !important; }
+    #pd9-hub-sorted .pd9-bulk-bar { display: inline-flex; align-items: center; gap: 8px; margin-left: auto; }
+    #pd9-hub-sorted .pd9-bulk-count { color: var(--ink); font-weight: 600; }
+    #pd9-hub-sorted .pd9-bulk-btn { border: 1px solid #d0d5dd; background: #fff; color: var(--ink); padding: 4px 12px; border-radius: 7px; font: inherit; font-size: 12.5px; font-weight: 600; cursor: pointer; }
+    #pd9-hub-sorted .pd9-bulk-btn:hover { background: #f5f9f9; }
+    #pd9-hub-sorted .pd9-bulk-primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+    #pd9-hub-sorted .pd9-bulk-primary:hover { background: #18625f; }
+    #pd9-hub-sorted .pd9-bulk-link { border: 0; background: none; color: var(--accent); font: inherit; font-size: 12.5px; font-weight: 600; cursor: pointer; text-decoration: underline; text-underline-offset: 3px; }
+    /* The multi-case note/task box, styled after Filevine's own */
+    .pd9-bulk-modal { z-index: 100003 !important; }
+    .pd9-bulk-modal .pd9-bulk-dialog { width: min(640px, 100%); }
+    .pd9-bc-head { display: flex; align-items: center; gap: 12px; padding: 12px 16px; border-bottom: 1px solid var(--t-color-border, #e4e7ec); }
+    .pd9-bc-head h2 { flex: 1; margin: 0; font-size: 16px; font-weight: 600; }
+    .pd9-bc-types { display: inline-flex; gap: 2px; padding: 2px; background: var(--t-color-object-1-secondary, #f2f4f7); border-radius: 8px; }
+    .pd9-bc-types button { display: grid; place-items: center; width: 34px; height: 30px; border: 0; border-radius: 6px; background: none; color: var(--t-color-text-secondary, #667085); cursor: pointer; }
+    .pd9-bc-types button.pd9-on { background: var(--t-color-surface, #fff); color: #1f7a77; box-shadow: 0 1px 2px rgba(16, 24, 40, .14); }
+    .pd9-bc-cases { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; padding: 10px 16px 0; max-height: 84px; overflow: auto; }
+    .pd9-bc-case { padding: 2px 8px; border-radius: 6px; background: #e8f3f2; color: #155e5b; font-size: 12px; font-weight: 600; white-space: nowrap; }
+    .pd9-bc-form { display: flex; flex-direction: column; gap: 12px; padding: 12px 16px 4px; }
+    .pd9-bc-label { display: block; margin-bottom: 4px; font-size: 12px; font-weight: 600; color: var(--t-color-text-secondary, #475467); }
+    .pd9-bc-tpls { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+    .pd9-bc-tpls .pd9-bc-label { display: inline; margin: 0 4px 0 0; }
+    .pd9-bc-tpl { border: 1px solid #d0d5dd; background: #fff; border-radius: 999px; padding: 3px 12px; font: inherit; font-size: 12.5px; font-weight: 600; color: #1d2433; cursor: pointer; }
+    .pd9-bc-tpl:hover { border-color: #1f7a77; color: #1f7a77; }
+    .pd9-bc-field { display: block; }
+    .pd9-bc-field input[type=text], .pd9-bc-field input[type=date], .pd9-bc-field textarea {
+      width: 100%; box-sizing: border-box; font: inherit; font-size: 14px; color: inherit; background: var(--t-color-surface, #fff);
+      border: 1px solid var(--t-color-border, #d0d5dd); border-radius: 6px; padding: 8px 10px;
+    }
+    .pd9-bc-field textarea { resize: vertical; min-height: 140px; line-height: 1.45; }
+    .pd9-bc-field input:focus, .pd9-bc-field textarea:focus { outline: 2px solid #1f7a77; outline-offset: -1px; }
+    .pd9-bc-field input[type=date] { width: 200px; }
+    .pd9-bc-tags { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; border: 1px solid var(--t-color-border, #d0d5dd); border-radius: 6px; padding: 5px 6px; }
+    .pd9-bc-tags input { flex: 1; min-width: 160px; border: 0 !important; padding: 3px 4px !important; outline: none !important; }
+    .pd9-bc-chip { display: inline-flex; align-items: center; gap: 4px; padding: 2px 4px 2px 8px; border-radius: 6px; background: #e8f3f2; color: #155e5b; font-size: 12.5px; font-weight: 600; }
+    .pd9-bc-chip button { border: 0; background: none; color: inherit; opacity: .6; cursor: pointer; font-size: 11px; padding: 0 3px; }
+    .pd9-bc-chip button:hover { opacity: 1; }
+    .pd9-bc-task[hidden] { display: none; }
+    .pd9-bc-note { margin: 6px 0 0; font-size: 12px; color: var(--t-color-text-secondary, #667085); }
+    .pd9-bc-run { padding: 12px 16px; display: grid; grid-template-columns: 1fr 260px; gap: 14px; }
+    .pd9-bc-run[hidden] { display: none; }
+    .pd9-bc-list { list-style: none; margin: 0; padding: 0; max-height: 320px; overflow: auto; }
+    .pd9-bc-item { display: grid; grid-template-columns: 18px 1fr; column-gap: 8px; padding: 7px 4px; border-bottom: 1px solid #eef0f3; font-size: 13px; }
+    .pd9-bc-item a { color: #1f7a77; font-weight: 600; text-decoration: none; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .pd9-bc-msg { grid-column: 2; font-size: 12px; color: #667085; }
+    .pd9-bc-state { grid-row: span 2; width: 14px; height: 14px; margin-top: 2px; border-radius: 50%; border: 2px solid #d0d5dd; box-sizing: border-box; }
+    .pd9-busy .pd9-bc-state { border-color: #c9ced6; border-top-color: #1f7a77; animation: pd9spin .8s linear infinite; }
+    .pd9-ok .pd9-bc-state { border: 0; background: #1f7a77; }
+    .pd9-ok .pd9-bc-state::after { content: "✓"; display: block; color: #fff; font-size: 10px; line-height: 14px; text-align: center; }
+    .pd9-bad .pd9-bc-state { border: 0; background: #b42318; }
+    .pd9-bad .pd9-bc-msg { color: #b42318; }
+    .pd9-skip .pd9-bc-msg { color: #98a2b3; }
+    .pd9-bc-live[hidden] { display: none; }
+    .pd9-bc-frame { position: relative; width: 260px; height: 190px; overflow: hidden; border-radius: 8px; box-shadow: 0 0 0 1px #e4e7ec; background: #f8f9fb; }
+    .pd9-bc-frame iframe { position: absolute; left: 0; top: 0; width: 1040px; height: 760px; border: 0; transform: scale(.25); transform-origin: 0 0; pointer-events: none; }
+    .pd9-bc-hint { font-size: 12px; color: #98a2b3; }
+    @media (max-width: 640px) { .pd9-bc-run { grid-template-columns: 1fr; } }
+    /* Case switcher (Spotlight style) */
+    #pd9-switch {
+      position: fixed; inset: 0; z-index: 2147483100; display: flex; justify-content: center; align-items: flex-start; padding-top: 16vh;
+      background: rgba(16, 24, 40, .28); backdrop-filter: blur(3px); -webkit-backdrop-filter: blur(3px); animation: pd9SwFade .12s ease-out;
+    }
+    @keyframes pd9SwFade { from { opacity: 0; } to { opacity: 1; } }
+    #pd9-switch .pd9-sw-panel {
+      width: min(680px, 92vw); max-height: 64vh; display: flex; flex-direction: column; overflow: hidden;
+      background: rgba(255, 255, 255, .94); backdrop-filter: saturate(1.6) blur(24px); -webkit-backdrop-filter: saturate(1.6) blur(24px);
+      border-radius: 16px; box-shadow: 0 0 0 1px rgba(16, 24, 40, .12), 0 30px 70px -20px rgba(16, 24, 40, .55);
+      color: #1d2433; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; font-variant-numeric: tabular-nums;
+      animation: pd9SwPop .14s cubic-bezier(.2, .9, .3, 1.2);
+    }
+    @keyframes pd9SwPop { from { transform: scale(.97) translateY(-4px); opacity: 0; } to { transform: none; opacity: 1; } }
+    #pd9-switch .pd9-sw-input { display: flex; align-items: center; gap: 12px; padding: 14px 18px; color: #667085; border-bottom: 1px solid rgba(16, 24, 40, .08); }
+    #pd9-switch .pd9-sw-input input { flex: 1; min-width: 0; border: 0; outline: 0; background: transparent; font: inherit; font-size: 21px; color: #1d2433; }
+    #pd9-switch .pd9-sw-input input::placeholder { color: #98a2b3; }
+    #pd9-switch .pd9-sw-spin { width: 16px; height: 16px; border-radius: 50%; border: 2px solid #d0d5dd; border-top-color: #1f7a77; animation: pd9spin .8s linear infinite; }
+    #pd9-switch .pd9-sw-spin[hidden] { display: none; }
+    #pd9-switch .pd9-sw-list { overflow: auto; padding: 6px; }
+    #pd9-switch .pd9-sw-group { padding: 8px 12px 4px; font-size: 11.5px; font-weight: 600; color: #667085; }
+    #pd9-switch .pd9-sw-row { display: grid; grid-template-columns: 170px 1fr auto; align-items: center; gap: 12px; padding: 9px 12px; border-radius: 9px; cursor: pointer; }
+    #pd9-switch .pd9-sw-sel { background: #1f7a77; color: #fff; }
+    #pd9-switch .pd9-sw-case { font-weight: 600; color: #1f7a77; white-space: nowrap; }
+    #pd9-switch .pd9-sw-sel .pd9-sw-case { color: #fff; }
+    #pd9-switch .pd9-sw-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14.5px; }
+    #pd9-switch .pd9-sw-next { font-size: 12px; color: #667085; white-space: nowrap; }
+    #pd9-switch .pd9-sw-sel .pd9-sw-next { color: rgba(255, 255, 255, .85); }
+    #pd9-switch .pd9-sw-here .pd9-sw-next { font-weight: 600; }
+    #pd9-switch .pd9-sw-empty { padding: 18px 14px; color: #667085; font-size: 14px; }
+    #pd9-switch .pd9-sw-foot { display: flex; gap: 16px; padding: 8px 16px; border-top: 1px solid rgba(16, 24, 40, .08); font-size: 11.5px; color: #667085; }
+    #pd9-switch kbd, .pd9-kbd { font: inherit; font-size: 11px; padding: 1px 5px; margin-right: 3px; border-radius: 4px; background: rgba(16, 24, 40, .07); box-shadow: inset 0 -1px 0 rgba(16, 24, 40, .15); }
+    .pd9-head-btn .pd9-kbd { margin-left: 6px; background: rgba(255, 255, 255, .18); box-shadow: none; }
+    @media (prefers-reduced-motion: reduce) { #pd9-switch, #pd9-switch .pd9-sw-panel { animation: none; } }
+    /* Activity tab: show each note in full instead of cutting it off at 3 lines */
+    .activity-text-body.lineClamp {
+      -webkit-line-clamp: none !important; line-clamp: none !important;
+      max-height: none !important; overflow: visible !important; display: block !important;
+    }
     .fvqn-toast {
       position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
       background: #1f2933; color: #fff; padding: 8px 14px; border-radius: 6px;
@@ -2803,7 +4764,7 @@
   // Filevine is a single-page app, so keep watching for composers to appear.
   // Changes inside the script's own windows (search panels, tables, toasts) don't
   // need a recheck. Everything else is batched: at most one recheck every 120ms.
-  const OWN_UI = '#pd9-adv, #pd9-case, .pd9-overlay, .pd9-panel, .fvqn-toast, #pd9-case-badge';
+  const OWN_UI = '#pd9-adv, #pd9-case, .pd9-overlay, .pd9-panel, .fvqn-toast, #pd9-case-badge, #pd9-hub-sorted';
   const isOwn = (node) => { const el = node && (node.nodeType === 1 ? node : node.parentElement); return !!(el && el.closest && el.closest(OWN_UI)); };
   let pending = false;
   let lastRun = 0;
@@ -2818,7 +4779,7 @@
 
   // Print the version to the console. Filevine mutes console.log on its page,
   // so borrow a clean console from a hidden blank frame.
-  (function printVersion() {
+  if (!IN_FRAME) (function printVersion() {
     const version = typeof GM_info !== 'undefined' ? GM_info.script.version : '?';
     let out = console;
     try {
