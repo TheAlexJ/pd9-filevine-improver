@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PD9 Filevine Improver
 // @namespace    https://filevine.local/pd9-improver
-// @version      3.92.0
+// @version      3.94.0
 // @description  Faster notes, tasks, and case closing in Filevine for PD9.
 // @match        https://*.filevine.com/*
 // @match        https://*.filevineapp.com/*
@@ -2751,6 +2751,10 @@
         ? h.tagsV2.filter((t) => !t.isArchived).map((t) => ({ name: t.name, color: t.colorNumber }))
         : (h.hashtags || []).map((t) => ({ name: t, color: null })))
         .map((t) => ({ name: String(t.name).startsWith('#') ? t.name : `#${t.name}`, color: t.color })),
+      // Every tag on the case with its id (archived and automatic ones too), for editing tags.
+      allTags: h.tagsV2 && h.tagsV2.length && h.tagsV2.every((t) => t.id)
+        ? h.tagsV2.map((t) => ({ id: t.id, name: t.name, color: t.colorNumber, isArchived: !!t.isArchived, isAutoTag: !!t.isAutoTag }))
+        : null,
     }));
   }
 
@@ -3073,7 +3077,19 @@
         td.textContent = e ? shortTitle(e.title) : '';
         if (e) td.title = [e.title, e.location].filter(Boolean).join('\n'); // full name on hover
         break;
-      case 'tags': r.tags.forEach((t) => td.appendChild(tagChip(t))); td.classList.add('pd9-own-tags'); break;
+      case 'tags': {
+        r.tags.forEach((t) => td.appendChild(tagChip(t)));
+        td.classList.add('pd9-own-tags');
+        const plus = document.createElement('button');
+        plus.type = 'button';
+        plus.className = 'pd9-tag-add';
+        plus.title = 'Add or remove tags';
+        plus.setAttribute('aria-label', `Edit tags for ${r.caseNo || 'this case'}`);
+        plus.textContent = '+';
+        plus.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); openTagEditor(plus, [r], plus.closest('#pd9-hub-sorted')); });
+        td.appendChild(plus);
+        break;
+      }
       case 'charges': {
         // Same as Advanced Search: click for the full table from the Charges tab.
         const btn = document.createElement('button');
@@ -3106,6 +3122,180 @@
       }
       default: break;
     }
+  }
+
+  // ---------- Add and remove tags from the PD9 table ----------
+  // Uses the same calls as Filevine's own Edit Tags: the org's tag list
+  // (/api/tagsv2/<org>/index) and saving the case's full tag list
+  // (/api/projects/<id>/hashtags). Saving sends every tag the case keeps, so
+  // the script first reads the case's current tags and never drops one by accident.
+  const orgTagCache = new Map(); // org -> { at, list }
+  async function loadOrgTags(orgId) {
+    const hit = orgTagCache.get(orgId);
+    if (hit && Date.now() - hit.at < 10 * 60 * 1000) return hit.list;
+    const byId = new Map();
+    const tries = [{ orgId: +orgId, ArchivedStatus: 'Exclude' }, { orgId: +orgId, ArchivedStatus: 'None' }, { orgId: +orgId }];
+    for (const body of tries) {
+      try {
+        const res = await fetch(`/api/tagsv2/${encodeURIComponent(orgId)}/index`, { method: 'POST', credentials: 'include', headers: { Accept: 'application/json', 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+        if (!res.ok) continue;
+        const json = await res.json();
+        const docs = (json && json.data && json.data.documents) || [];
+        docs.filter((t) => t && t.id && !t.isArchived).forEach((t) => byId.set(t.id, { id: t.id, name: t.name, color: t.colorNumber, desc: t.description || '', count: t.projectCount || 0 }));
+        if (byId.size) break;
+      } catch (e) { /* try the next way */ }
+    }
+    // Add tags seen on your cases, in case the list above came back short.
+    for (const r of (hubTable && hubTable.rows) || []) (r.allTags || []).forEach((t) => { if (!t.isArchived && !byId.has(t.id)) byId.set(t.id, { id: t.id, name: t.name, color: t.color, desc: '', count: 0 }); });
+    const list = [...byId.values()].map((t) => ({ ...t, name: String(t.name).startsWith('#') ? t.name : `#${t.name}` }))
+      .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
+    orgTagCache.set(orgId, { at: Date.now(), list });
+    return list;
+  }
+  // The case's tags right now (with ids), straight from Filevine if possible.
+  async function currentCaseTags(r) {
+    try {
+      const res = await fetch(`/api/projects/${encodeURIComponent(r.id)}/hashtags`, { credentials: 'include', headers: { Accept: 'application/json' } });
+      if (res.ok) {
+        const json = await res.json();
+        const tags = json && json.data && (json.data.tags || (Array.isArray(json.data) ? json.data : null));
+        if (Array.isArray(tags) && tags.every((t) => t.id)) return tags.map((t) => ({ id: t.id, name: t.name, color: t.colorNumber, isArchived: !!t.isArchived, isAutoTag: !!t.isAutoTag }));
+      }
+    } catch (e) { /* use what the Project Hub gave us */ }
+    if (r.allTags) return r.allTags;
+    throw new Error('Could not read this case\'s current tags, so nothing was changed. Use Edit Tags on the case instead.');
+  }
+  async function saveCaseTags(r, tags) {
+    const res = await fetch(`/api/projects/${encodeURIComponent(r.id)}/hashtags`, {
+      method: 'POST', credentials: 'include',
+      headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
+      body: JSON.stringify({ tagIDs: [...new Set(tags.map((t) => t.id))] }),
+    });
+    const json = await res.json().catch(() => null);
+    if (!res.ok || !json || json.success === false) throw new Error((json && json.message) || `Filevine said no (error ${res.status}).`);
+    const saved = (json.data && json.data.tags) || tags;
+    r.allTags = saved.map((t) => ({ id: t.id, name: t.name, color: t.colorNumber != null ? t.colorNumber : t.color, isArchived: !!t.isArchived, isAutoTag: !!t.isAutoTag }));
+    r.tags = r.allTags.filter((t) => !t.isArchived).map((t) => ({ name: String(t.name).startsWith('#') ? t.name : `#${t.name}`, color: t.color }));
+    return r;
+  }
+  async function changeCaseTag(r, tag, add) {
+    const now = await currentCaseTags(r);
+    const has = now.some((t) => t.id === tag.id);
+    if (add === has) return r; // nothing to do
+    const next = add ? [...now, tag] : now.filter((t) => t.id !== tag.id);
+    await saveCaseTags(r, next);
+    if (add && !r.allTags.some((t) => t.id === tag.id)) throw new Error(`Filevine didn't keep ${tag.name}.`);
+    return r;
+  }
+
+  // The little tag editor: tags on the case (click x to remove), and a search box to add more.
+  // `rows` is one case, or several (from "Add tag" with cases selected).
+  function openTagEditor(anchor, rows, ov) {
+    document.querySelectorAll('.pd9-tag-edit').forEach((m) => m.remove());
+    const many = rows.length > 1;
+    const r0 = rows[0];
+    const box = document.createElement('div');
+    box.className = 'pd9-tag-edit';
+    box.setAttribute('role', 'dialog');
+    box.setAttribute('aria-label', many ? `Add a tag to ${rows.length} cases` : `Tags for ${r0.caseNo}`);
+    box.innerHTML = `
+      <div class="pd9-te-title">${many ? `Add a tag to ${rows.length} cases` : `Tags: ${escapeAttr(r0.caseNo || '')}`}</div>
+      ${many ? '' : '<div class="pd9-te-on"></div>'}
+      <input type="search" class="pd9-te-find" placeholder="Find a tag to add" aria-label="Find a tag to add" autocomplete="off">
+      <ul class="pd9-te-list" role="listbox"></ul>
+      <div class="pd9-te-note" aria-live="polite"></div>`;
+    document.body.appendChild(box);
+    const rect = anchor.getBoundingClientRect();
+    box.style.left = `${Math.max(8, Math.min(rect.left, window.innerWidth - 300))}px`;
+    box.style.top = `${Math.min(rect.bottom + 6, window.innerHeight - 340)}px`;
+    const find = box.querySelector('.pd9-te-find');
+    const list = box.querySelector('.pd9-te-list');
+    const note = box.querySelector('.pd9-te-note');
+    const onBox = box.querySelector('.pd9-te-on');
+    let all = [];
+    let busy = false;
+    let active = 0;
+    const say = (t, bad) => { note.textContent = t || ''; note.classList.toggle('pd9-te-bad', !!bad); };
+    const drawOn = () => {
+      if (!onBox) return;
+      onBox.textContent = '';
+      const shown = (r0.allTags || r0.tags.map((t) => ({ ...t, id: null }))).filter((t) => !t.isArchived);
+      if (!shown.length) { onBox.innerHTML = '<span class="pd9-te-none">No tags yet</span>'; return; }
+      shown.forEach((t) => {
+        const chip = document.createElement('span');
+        chip.className = 'pd9-te-chip';
+        if (t.color != null) chip.style.setProperty('--pd9-tag', `var(--t-color-object-${t.color}-primary, #1f7a77)`);
+        chip.textContent = String(t.name).replace(/^#/, '');
+        if (t.id && !t.isAutoTag) {
+          const x = document.createElement('button');
+          x.type = 'button';
+          x.setAttribute('aria-label', `Remove ${t.name}`);
+          x.title = `Remove ${t.name}`;
+          x.textContent = '×';
+          x.addEventListener('click', () => apply(t, false));
+          chip.appendChild(x);
+        } else if (t.isAutoTag) chip.title = 'Added automatically by Filevine';
+        onBox.appendChild(chip);
+      });
+    };
+    const drawList = () => {
+      const q = find.value.trim().toLowerCase().replace(/^#/, '');
+      const have = new Set(many ? [] : (r0.allTags || []).map((t) => t.id));
+      const items = all.filter((t) => !have.has(t.id) && (!q || t.name.toLowerCase().replace(/^#/, '').includes(q))).slice(0, 40);
+      active = Math.min(active, Math.max(0, items.length - 1));
+      list.textContent = '';
+      items.forEach((t, i) => {
+        const li = document.createElement('li');
+        li.setAttribute('role', 'option');
+        li.className = i === active ? 'pd9-te-active' : '';
+        const dot = document.createElement('span');
+        dot.className = 'pd9-te-dot';
+        if (t.color != null) dot.style.setProperty('--pd9-tag', `var(--t-color-object-${t.color}-primary, #1f7a77)`);
+        const nm = document.createElement('span');
+        nm.textContent = t.name;
+        li.append(dot, nm);
+        if (t.desc) li.title = t.desc;
+        li.addEventListener('mousedown', (e) => { e.preventDefault(); apply(t, true); });
+        list.appendChild(li);
+      });
+      if (!items.length) list.innerHTML = `<li class="pd9-te-empty">${all.length ? 'No matching tag' : 'Loading tags...'}</li>`;
+      list._items = items;
+    };
+    async function apply(tag, add) {
+      if (busy) return;
+      busy = true;
+      box.classList.add('pd9-te-busy');
+      let done = 0, failed = 0, lastErr = '';
+      for (const r of rows) {
+        say(many ? `${add ? 'Adding' : 'Removing'} ${tag.name}: ${done + failed + 1} of ${rows.length}...` : `${add ? 'Adding' : 'Removing'} ${tag.name}...`);
+        try { await changeCaseTag(r, tag, add); done++; } catch (e) { failed++; lastErr = e.message; }
+      }
+      busy = false;
+      box.classList.remove('pd9-te-busy');
+      say(failed ? `${failed} didn't save. ${lastErr}` : (many ? `Added ${tag.name} to ${done} case${done === 1 ? '' : 's'}.` : ''), !!failed);
+      if (done) {
+        try { if (typeof saveHubTableCache === 'function') saveHubTableCache(); } catch (e) { /* not needed */ }
+        if (ov && ov.isConnected) drawOwnTable(ov);
+      }
+      find.value = '';
+      drawOn();
+      drawList();
+      find.focus();
+    }
+    find.addEventListener('input', () => { active = 0; drawList(); });
+    find.addEventListener('keydown', (e) => {
+      const items = list._items || [];
+      if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { e.preventDefault(); if (items.length) { active = (active + (e.key === 'ArrowDown' ? 1 : -1) + items.length) % items.length; drawList(); } }
+      else if (e.key === 'Enter') { e.preventDefault(); if (items[active]) apply(items[active], true); }
+      else if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); close(); }
+    });
+    const close = () => { box.remove(); document.removeEventListener('mousedown', outside, true); };
+    const outside = (e) => { if (!box.contains(e.target) && e.target !== anchor) close(); };
+    setTimeout(() => document.addEventListener('mousedown', outside, true), 0);
+    drawOn();
+    drawList();
+    find.focus();
+    loadOrgTags(r0.orgID || 221).then((l) => { all = l; drawList(); }).catch(() => say('Could not load the tag list.', true));
   }
 
   function drawOwnTable(ov) {
@@ -3295,6 +3485,7 @@
       act.append(label,
         mk('Add note', 'pd9-bulk-btn pd9-bulk-primary', () => openBulkComposer('note', pickedRows())),
         mk('Add task', 'pd9-bulk-btn', () => openBulkComposer('task', pickedRows())),
+        mk('Add tag', 'pd9-bulk-btn', (e) => openTagEditor(e.currentTarget, pickedRows(), ov)),
         mk('Clear', 'pd9-bulk-link', () => { bulkPicked.clear(); drawOwnTable(ov); }));
     }
     let chips = ov.querySelector('.pd9-hs-filters');
@@ -4489,6 +4680,191 @@
     if (hadText) toast('Closed. Click "Restore note" to bring it back.');
   });
 
+
+  // ---------- Filing Cabinet: quick preview ----------
+  // An eye button on each file opens it in a panel on the right, using Filevine's
+  // own viewer (/docwebviewer/view/<id>), without leaving the file list.
+  // While the panel is open: Up/Down arrows go to the previous/next file, Esc closes.
+  const DOCPREV_W_KEY = 'pd9-docprev-width';
+  const docRows = () => $$('.ag-center-cols-container .ag-row[row-id^="doc-"], .ag-pinned-left-cols-container .ag-row[row-id^="doc-"]')
+    .filter((r, i, all) => all.findIndex((x) => x.getAttribute('row-id') === r.getAttribute('row-id')) === i)
+    .filter((r) => $('.namecell-text', r))
+    .sort((a, b) => (+a.getAttribute('aria-rowindex') || 0) - (+b.getAttribute('aria-rowindex') || 0));
+  const docIdOf = (row) => (row.getAttribute('row-id') || '').replace(/^doc-/, '');
+  const docNameOf = (row) => (($('.namecell-text', row) || {}).textContent || '').trim();
+  const docViewUrl = (id) => `${location.origin}/docwebviewer/view/${encodeURIComponent(id)}`;
+  let docPrevId = null;
+
+  function addDocPreview() {
+    if (!/#\/project\/\d+\/docs/.test(location.hash)) { closeDocPreview(); return; }
+    for (const row of docRows()) {
+      const slot = $('.after-namecell-text', row) || $('.namecell', row);
+      if (!slot || $('.pd9-doc-eye', slot)) continue;
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'pd9-doc-eye';
+      b.title = 'Preview here (Up/Down for the next file)';
+      b.setAttribute('aria-label', `Preview ${docNameOf(row)}`);
+      b.innerHTML = '<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/><circle cx="12" cy="12" r="3" fill="none" stroke="currentColor" stroke-width="2"/></svg>';
+      // Keep the click away from Filevine, which would open the file in a new tab.
+      ['pointerdown', 'mousedown', 'mouseup', 'dblclick'].forEach((t) => b.addEventListener(t, (e) => e.stopPropagation()));
+      b.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const r = b.closest('.ag-row');
+        if (r) openDocPreview(docIdOf(r), docNameOf(r));
+      });
+      slot.prepend(b);
+    }
+    markPreviewedRow();
+  }
+  function markPreviewedRow() {
+    $$('.pd9-doc-current').forEach((r) => { if (r.getAttribute('row-id') !== `doc-${docPrevId}`) r.classList.remove('pd9-doc-current'); });
+    if (docPrevId) $$(`.ag-row[row-id="doc-${CSS.escape(docPrevId)}"]`).forEach((r) => r.classList.add('pd9-doc-current'));
+  }
+
+  function openDocPreview(id, name) {
+    if (!id) return;
+    let panel = document.getElementById('pd9-docprev');
+    if (!panel) {
+      panel = document.createElement('aside');
+      panel.id = 'pd9-docprev';
+      panel.setAttribute('role', 'dialog');
+      panel.setAttribute('aria-label', 'File preview');
+      panel.innerHTML = `
+        <span class="pd9-dp-edge" title="Drag to resize" aria-hidden="true"></span>
+        <header class="pd9-dp-head">
+          <button type="button" class="pd9-dp-btn pd9-dp-prev" title="Previous file (Up arrow)" aria-label="Previous file"><svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="M6 15l6-6 6 6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+          <button type="button" class="pd9-dp-btn pd9-dp-next" title="Next file (Down arrow)" aria-label="Next file"><svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="M6 9l6 6 6-6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+          <span class="pd9-dp-title"></span>
+          <span class="pd9-dp-count"></span>
+          <button type="button" class="pd9-dp-btn pd9-dp-tab" title="Open in a new tab" aria-label="Open in a new tab"><svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true"><path d="M14 5h5v5M19 5l-8 8M18 14v5H5V6h5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+          <button type="button" class="pd9-dp-btn pd9-dp-x" title="Close (Esc)" aria-label="Close preview"><svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true"><path d="M7 7l10 10M17 7L7 17" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></button>
+        </header>
+        <div class="pd9-dp-body"><div class="pd9-dp-msg" hidden></div></div>`;
+      document.body.appendChild(panel);
+      const w = +store.get(DOCPREV_W_KEY, 0);
+      if (w) panel.style.width = `${Math.min(Math.max(w, 360), window.innerWidth - 120)}px`;
+      $('.pd9-dp-x', panel).addEventListener('click', closeDocPreview);
+      $('.pd9-dp-prev', panel).addEventListener('click', () => stepDocPreview(-1));
+      $('.pd9-dp-next', panel).addEventListener('click', () => stepDocPreview(1));
+      $('.pd9-dp-tab', panel).addEventListener('click', () => { if (docPrevId) window.open(docViewUrl(docPrevId), '_blank'); });
+      // Drag the left edge to resize.
+      const edge = $('.pd9-dp-edge', panel);
+      edge.addEventListener('pointerdown', (e) => {
+        e.preventDefault();
+        edge.setPointerCapture(e.pointerId);
+        panel.classList.add('pd9-dp-resizing');
+        const move = (ev) => { panel.style.width = `${Math.min(Math.max(window.innerWidth - ev.clientX, 360), window.innerWidth - 120)}px`; };
+        const up = () => {
+          edge.removeEventListener('pointermove', move);
+          edge.removeEventListener('pointerup', up);
+          panel.classList.remove('pd9-dp-resizing');
+          store.set(DOCPREV_W_KEY, Math.round(panel.getBoundingClientRect().width));
+        };
+        edge.addEventListener('pointermove', move);
+        edge.addEventListener('pointerup', up);
+      });
+      document.addEventListener('keydown', docPrevKeys, true);
+    }
+    docPrevId = String(id);
+    showDocFrame(panel, docPrevId);
+    $('.pd9-dp-title', panel).textContent = name || `File ${id}`;
+    $('.pd9-dp-title', panel).title = name || '';
+    const rows = docRows();
+    const at = rows.findIndex((r) => docIdOf(r) === docPrevId);
+    $('.pd9-dp-count', panel).textContent = at >= 0 ? `${at + 1} of ${rows.length}` : '';
+    $('.pd9-dp-prev', panel).disabled = at <= 0;
+    $('.pd9-dp-next', panel).disabled = at < 0 || at >= rows.length - 1;
+    markPreviewedRow();
+    const row = rows[at];
+    if (row) row.scrollIntoView({ block: 'nearest' });
+    // Load the files around this one in the background, so stepping to them is instant.
+    const near = [rows[at + 1], rows[at - 1], rows[at + 2]].filter(Boolean).map(docIdOf);
+    keepDocFrames(panel, [docPrevId, ...near]);
+    preloadDocFrames(panel, near);
+  }
+
+  // Each file gets its own viewer frame. Frames for nearby files stay loaded
+  // (hidden), so going to the next or previous file just shows the one that's
+  // already there instead of starting the viewer again.
+  const DOC_FRAMES_MAX = 5;
+  function docFrame(panel, id, make) {
+    let f = $(`iframe[data-doc="${CSS.escape(id)}"]`, panel);
+    if (f || !make) return f;
+    f = document.createElement('iframe');
+    f.name = 'fv-doc-preview';
+    f.title = 'File preview';
+    f.dataset.doc = id;
+    f.dataset.used = String(Date.now());
+    f.addEventListener('load', () => {
+      let ok = true;
+      try { const href = f.contentWindow.location.href; ok = !!href && href !== 'about:blank'; } catch (e) { ok = false; }
+      f.dataset.state = ok ? 'ok' : 'blocked';
+      if (ok) { try { f.contentWindow.document.addEventListener('keydown', docPrevKeys, true); } catch (e) { /* not allowed */ } }
+      if (f.classList.contains('pd9-dp-on')) showDocMsg(panel, f);
+    });
+    f.src = docViewUrl(id);
+    $('.pd9-dp-body', panel).appendChild(f);
+    return f;
+  }
+  function showDocMsg(panel, f) {
+    const msg = $('.pd9-dp-msg', panel);
+    if (f.dataset.state !== 'blocked') { msg.hidden = true; return; }
+    msg.hidden = false;
+    msg.innerHTML = '<p>Filevine won\'t show this file inside the page.</p><button type="button">Open it in a new tab</button>';
+    $('button', msg).addEventListener('click', () => window.open(docViewUrl(f.dataset.doc), '_blank'));
+  }
+  function showDocFrame(panel, id) {
+    const f = docFrame(panel, id, true);
+    f.dataset.used = String(Date.now());
+    $$('iframe', panel).forEach((x) => x.classList.toggle('pd9-dp-on', x === f));
+    showDocMsg(panel, f);
+  }
+  function keepDocFrames(panel, keep) {
+    const frames = $$('iframe', panel).filter((x) => !keep.includes(x.dataset.doc))
+      .sort((a, b) => +a.dataset.used - +b.dataset.used);
+    while (frames.length && $$('iframe', panel).length > DOC_FRAMES_MAX) frames.shift().remove();
+  }
+  // One at a time, after the file you're looking at has loaded, so they don't slow it down.
+  function preloadDocFrames(panel, ids) {
+    const cur = docFrame(panel, docPrevId, false);
+    const go = () => {
+      const want = docPrevId;
+      let chain = Promise.resolve();
+      ids.forEach((id) => {
+        chain = chain.then(() => new Promise((done) => {
+          if (!panel.isConnected || docPrevId !== want || docFrame(panel, id, false)) { done(); return; }
+          const f = docFrame(panel, id, true);
+          f.addEventListener('load', () => setTimeout(done, 300), { once: true });
+          setTimeout(done, 15000);
+        }));
+      });
+    };
+    if (cur && cur.dataset.state) go(); else if (cur) cur.addEventListener('load', () => setTimeout(go, 500), { once: true });
+  }
+  function stepDocPreview(d) {
+    const rows = docRows();
+    const at = rows.findIndex((r) => docIdOf(r) === docPrevId);
+    const next = rows[at + d];
+    if (next) openDocPreview(docIdOf(next), docNameOf(next));
+  }
+  function docPrevKeys(e) {
+    if (!document.getElementById('pd9-docprev')) return;
+    const t = e.target;
+    if (t && (t.isContentEditable || /^(input|textarea|select)$/i.test(t.tagName || ''))) return;
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { e.preventDefault(); e.stopPropagation(); stepDocPreview(e.key === 'ArrowDown' ? 1 : -1); }
+    else if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); closeDocPreview(); }
+  }
+  function closeDocPreview() {
+    const panel = document.getElementById('pd9-docprev');
+    if (!panel) return;
+    panel.remove();
+    document.removeEventListener('keydown', docPrevKeys, true);
+    docPrevId = null;
+    markPreviewedRow();
+  }
+
   function decorate() {
     watchProject();
     addOptionsMenuItem();
@@ -4506,6 +4882,7 @@
     makeComposerMovable();
     addJailButton();
     addSwitchButton();
+    addDocPreview();
     for (const form of $$(COMPOSERS)) {
       const layout = $(SEL.layout, form);
       if (layout && !$('.fvqn-wrap', form)) layout.parentNode.insertBefore(buildBar(form), layout);
@@ -5235,6 +5612,54 @@
       -webkit-line-clamp: none !important; line-clamp: none !important;
       max-height: none !important; overflow: visible !important; display: block !important;
     }
+    /* Filing Cabinet quick preview */
+    .pd9-doc-eye { all: unset; display: inline-grid; place-items: center; width: 26px; height: 26px; margin-right: 4px; border-radius: 6px; color: #667085; cursor: pointer; opacity: 0; vertical-align: middle; }
+    .ag-row:hover .pd9-doc-eye, .pd9-doc-eye:focus-visible, .pd9-doc-current .pd9-doc-eye { opacity: 1; }
+    .pd9-doc-eye:hover { background: rgba(16, 24, 40, .08); color: #1d2433; }
+    .pd9-doc-eye:focus-visible { outline: 2px solid #1f7a77; outline-offset: 1px; }
+    .ag-row.pd9-doc-current { box-shadow: inset 3px 0 0 #1f7a77; background: #eef6f6 !important; }
+    .pd9-doc-current .pd9-doc-eye { color: #1f7a77; }
+    #pd9-docprev { position: fixed; top: 0; right: 0; bottom: 0; width: min(46vw, 900px); min-width: 360px; z-index: 99995; display: flex; flex-direction: column; background: #fff; box-shadow: -12px 0 40px -16px rgba(16, 24, 40, .45), -1px 0 0 rgba(16, 24, 40, .1); }
+    #pd9-docprev .pd9-dp-edge { position: absolute; left: -4px; top: 0; bottom: 0; width: 8px; cursor: ew-resize; z-index: 2; }
+    #pd9-docprev.pd9-dp-resizing iframe { pointer-events: none; }
+    #pd9-docprev iframe:not(.pd9-dp-on) { visibility: hidden; }
+    #pd9-docprev .pd9-dp-head { display: flex; align-items: center; gap: 4px; height: 44px; padding: 0 8px; border-bottom: 1px solid #e9ecf1; background: #f8f9fb; }
+    #pd9-docprev .pd9-dp-title { flex: 1; min-width: 0; margin-left: 6px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13.5px; font-weight: 600; color: #1d2433; }
+    #pd9-docprev .pd9-dp-count { font-size: 12px; color: #667085; white-space: nowrap; margin-right: 4px; font-variant-numeric: tabular-nums; }
+    #pd9-docprev .pd9-dp-btn { all: unset; display: grid; place-items: center; width: 30px; height: 30px; border-radius: 6px; color: #475467; cursor: pointer; }
+    #pd9-docprev .pd9-dp-btn:hover:not(:disabled) { background: rgba(16, 24, 40, .07); color: #1d2433; }
+    #pd9-docprev .pd9-dp-btn:disabled { opacity: .35; cursor: default; }
+    #pd9-docprev .pd9-dp-btn:focus-visible { outline: 2px solid #1f7a77; outline-offset: 1px; }
+    #pd9-docprev .pd9-dp-x:hover { background: #fee4e2 !important; color: #b42318 !important; }
+    #pd9-docprev .pd9-dp-body { position: relative; flex: 1; background: #eef0f3; }
+    #pd9-docprev iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; background: #fff; }
+    #pd9-docprev .pd9-dp-msg { position: absolute; inset: 0; display: grid; place-content: center; justify-items: center; gap: 10px; padding: 24px; background: #fff; text-align: center; color: #475467; font-size: 14px; }
+    #pd9-docprev .pd9-dp-msg[hidden] { display: none; }
+    #pd9-docprev .pd9-dp-msg button { font: inherit; font-size: 13px; font-weight: 600; padding: 8px 14px; border-radius: 8px; border: 0; background: #1f7a77; color: #fff; cursor: pointer; }
+    /* Tag editor in the PD9 table */
+    #pd9-hub-sorted .pd9-tag-add { all: unset; display: inline-grid; place-items: center; width: 22px; height: 22px; margin: 2px 0 2px 2px; border-radius: 6px; border: 1px dashed #c9ced6; color: #667085; font-size: 15px; line-height: 1; cursor: pointer; opacity: 0; vertical-align: middle; }
+    #pd9-hub-sorted tr:hover .pd9-tag-add, #pd9-hub-sorted .pd9-tag-add:focus-visible { opacity: 1; }
+    #pd9-hub-sorted .pd9-tag-add:hover { border-style: solid; border-color: #1f7a77; color: #1f7a77; background: #eef6f6; }
+    #pd9-hub-sorted .pd9-tag-add:focus-visible { outline: 2px solid #1f7a77; outline-offset: 1px; }
+    .pd9-tag-edit { position: fixed; z-index: 100005; width: 290px; padding: 10px; background: #fff; color: #1d2433; border-radius: 10px; box-shadow: 0 0 0 1px rgba(16, 24, 40, .1), 0 16px 40px -12px rgba(16, 24, 40, .4); font: 13px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    .pd9-tag-edit .pd9-te-title { font-weight: 600; margin: 0 2px 8px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .pd9-tag-edit .pd9-te-on { display: flex; flex-wrap: wrap; gap: 4px; margin: 0 0 8px; }
+    .pd9-tag-edit .pd9-te-none { color: #98a2b3; font-size: 12px; margin-left: 2px; }
+    .pd9-tag-edit .pd9-te-chip { display: inline-flex; align-items: center; gap: 2px; padding: 2px 4px 2px 8px; border-radius: 999px; font-size: 12px; font-weight: 600; color: var(--pd9-tag, #1f7a77); background: color-mix(in srgb, var(--pd9-tag, #1f7a77) 12%, #fff); }
+    .pd9-tag-edit .pd9-te-chip:not(:has(button)) { padding-right: 8px; }
+    .pd9-tag-edit .pd9-te-chip button { all: unset; display: grid; place-items: center; width: 16px; height: 16px; border-radius: 50%; font-size: 13px; line-height: 1; cursor: pointer; }
+    .pd9-tag-edit .pd9-te-chip button:hover { background: rgba(16, 24, 40, .12); }
+    .pd9-tag-edit .pd9-te-find { width: 100%; box-sizing: border-box; padding: 7px 9px; font: inherit; border: 1px solid #d0d5dd; border-radius: 8px; }
+    .pd9-tag-edit .pd9-te-find:focus { outline: 2px solid #1f7a77; outline-offset: -1px; }
+    .pd9-tag-edit .pd9-te-list { list-style: none; margin: 6px 0 0; padding: 0; max-height: 210px; overflow: auto; }
+    .pd9-tag-edit .pd9-te-list li { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-radius: 6px; cursor: pointer; }
+    .pd9-tag-edit .pd9-te-list li.pd9-te-active, .pd9-tag-edit .pd9-te-list li[role="option"]:hover { background: #eef6f6; }
+    .pd9-tag-edit .pd9-te-list li.pd9-te-empty { color: #98a2b3; cursor: default; }
+    .pd9-tag-edit .pd9-te-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--pd9-tag, #98a2b3); flex: none; }
+    .pd9-tag-edit .pd9-te-note { min-height: 0; margin: 6px 2px 0; font-size: 12px; color: #667085; }
+    .pd9-tag-edit .pd9-te-note:empty { display: none; }
+    .pd9-tag-edit .pd9-te-bad { color: #b42318; }
+    .pd9-tag-edit.pd9-te-busy .pd9-te-list, .pd9-tag-edit.pd9-te-busy .pd9-te-on { opacity: .5; pointer-events: none; }
     .pd9-ver { margin-left: 4px; font-size: .85em; font-weight: 400; opacity: .5; }
     .fvqn-toast {
       position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
@@ -5247,7 +5672,7 @@
   // Filevine is a single-page app, so keep watching for composers to appear.
   // Changes inside the script's own windows (search panels, tables, toasts) don't
   // need a recheck. Everything else is batched: at most one recheck every 120ms.
-  const OWN_UI = '#pd9-adv, #pd9-case, .pd9-overlay, .pd9-panel, .fvqn-toast, #pd9-case-badge, #pd9-hub-sorted';
+  const OWN_UI = '#pd9-adv, #pd9-case, #pd9-docprev, .pd9-overlay, .pd9-panel, .fvqn-toast, #pd9-case-badge, #pd9-hub-sorted';
   const isOwn = (node) => { const el = node && (node.nodeType === 1 ? node : node.parentElement); return !!(el && el.closest && el.closest(OWN_UI)); };
   let pending = false;
   let lastRun = 0;
