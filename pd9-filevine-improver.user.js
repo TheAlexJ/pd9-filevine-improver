@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PD9 Filevine Improver
 // @namespace    https://filevine.local/pd9-improver
-// @version      3.94.0
+// @version      3.95.0
 // @description  Faster notes, tasks, and case closing in Filevine for PD9.
 // @match        https://*.filevine.com/*
 // @match        https://*.filevineapp.com/*
@@ -3326,9 +3326,10 @@
     wrap.textContent = '';
     const table = document.createElement('table');
     const colgroup = document.createElement('colgroup');
-    const pickCol = document.createElement('col'); pickCol.style.width = '64px'; colgroup.appendChild(pickCol);
+    const pickW = Math.min(200, Math.max(56, +layout.widths._pick || 64));
+    const pickCol = document.createElement('col'); pickCol.style.width = `${pickW}px`; colgroup.appendChild(pickCol);
     cols.forEach((c) => { const el = document.createElement('col'); el.style.width = `${layout.widths[c.key] || c.width}px`; el.dataset.key = c.key; colgroup.appendChild(el); });
-    table.style.width = `${64 + cols.reduce((n, c) => n + (layout.widths[c.key] || c.width), 0)}px`;
+    table.style.width = `${pickW + cols.reduce((n, c) => n + (layout.widths[c.key] || c.width), 0)}px`;
 
     const head = document.createElement('tr');
     // Select all (the rows showing, so it respects the tag filter).
@@ -3343,6 +3344,34 @@
     all.indeterminate = picked > 0 && picked < shownIds.length;
     all.addEventListener('change', () => { shownIds.forEach((id) => (all.checked ? bulkPicked.add(id) : bulkPicked.delete(id))); drawOwnTable(ov); });
     allTh.appendChild(all);
+    // This column can be resized too: drag its right edge.
+    const pickGrip = document.createElement('span');
+    pickGrip.className = 'pd9-col-grip';
+    pickGrip.setAttribute('aria-hidden', 'true');
+    pickGrip.title = 'Drag to resize';
+    pickGrip.addEventListener('pointerdown', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const startX = e.clientX;
+      const startW = parseFloat(pickCol.style.width);
+      const startT = parseFloat(table.style.width);
+      pickGrip.setPointerCapture(e.pointerId);
+      const move = (ev) => {
+        const w = Math.min(200, Math.max(56, startW + ev.clientX - startX));
+        pickCol.style.width = `${w}px`;
+        table.style.width = `${startT + w - startW}px`;
+      };
+      const up = () => {
+        pickGrip.removeEventListener('pointermove', move);
+        pickGrip.removeEventListener('pointerup', up);
+        const l = ownLayout();
+        l.widths._pick = Math.round(parseFloat(pickCol.style.width));
+        saveLayout(l);
+      };
+      pickGrip.addEventListener('pointermove', move);
+      pickGrip.addEventListener('pointerup', up);
+    });
+    allTh.appendChild(pickGrip);
     head.appendChild(allTh);
     cols.forEach((c) => {
       const th = document.createElement('th');
@@ -4618,6 +4647,50 @@
     openSwitcher();
   }, true);
 
+  // ---------- Dark mode ----------
+  // One click (the moon button at the top, or Alt+Shift+D) flips Filevine dark.
+  // It works by inverting the page's colors, then flipping pictures, avatars and
+  // file previews back so they look normal. Case windows follow the main page.
+  const DARK_KEY = 'pd9-dark';
+  const DARK_SKIP = /\/docwebviewer\//i.test(location.pathname); // Filevine's file viewer: leave files as they are
+  function applyDark() {
+    if (IN_FRAME || DARK_SKIP) return;
+    const on = !!store.get(DARK_KEY, false);
+    document.documentElement.classList.toggle('pd9-dark', on);
+    const b = document.getElementById('pd9-dark-btn');
+    if (b) {
+      b.setAttribute('aria-pressed', String(on));
+      b.title = on ? 'Light mode (Alt+Shift+D)' : 'Dark mode (Alt+Shift+D)';
+      b.innerHTML = on
+        ? '<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="none" stroke="currentColor" stroke-width="2"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>'
+        : '<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="M20 14.5A8 8 0 0 1 9.5 4a8 8 0 1 0 10.5 10.5z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></svg>';
+    }
+  }
+  function toggleDark() {
+    store.set(DARK_KEY, !store.get(DARK_KEY, false));
+    applyDark();
+  }
+  function addDarkButton() {
+    if (IN_FRAME || DARK_SKIP || document.getElementById('pd9-dark-btn')) return;
+    const after = document.getElementById('pd9-switch-btn');
+    if (!after) return;
+    const btn = document.createElement('button');
+    btn.id = 'pd9-dark-btn';
+    btn.type = 'button';
+    btn.className = 'pd9-head-btn pd9-dark-btn';
+    btn.setAttribute('aria-label', 'Dark mode');
+    btn.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); toggleDark(); });
+    after.after(btn);
+    applyDark();
+  }
+  document.addEventListener('keydown', (e) => {
+    if (IN_FRAME || DARK_SKIP) return;
+    if (e.altKey && e.shiftKey && !e.ctrlKey && !e.metaKey && (e.code === 'KeyD' || /^d$/i.test(e.key))) { e.preventDefault(); toggleDark(); }
+  }, true);
+  // Another tab changed it: follow along.
+  window.addEventListener('focus', () => applyDark());
+  applyDark();
+
   function addSwitchButton() {
     if (document.getElementById('pd9-switch-btn')) return;
     const input = searchInput();
@@ -4882,6 +4955,7 @@
     makeComposerMovable();
     addJailButton();
     addSwitchButton();
+    addDarkButton();
     addDocPreview();
     for (const form of $$(COMPOSERS)) {
       const layout = $(SEL.layout, form);
@@ -5507,7 +5581,7 @@
     .pd9-task-x:hover { opacity: 1; background: #fee4e2; color: #b42318; }
     .pd9-task-home:focus-visible, .pd9-task-name:focus-visible, .pd9-task-x:focus-visible { outline: 2px solid #1f7a77; outline-offset: 1px; }
     /* Selecting cases in the PD9 table */
-    #pd9-hub-sorted .pd9-pick { width: 64px; padding: 0 0 0 14px !important; text-align: left; cursor: default; white-space: nowrap; }
+    #pd9-hub-sorted .pd9-pick { padding: 0 0 0 14px !important; text-align: left; cursor: default; white-space: nowrap; }
     #pd9-hub-sorted .pd9-pin-btn { all: unset; display: inline-grid; place-items: center; width: 24px; height: 24px; margin-left: 6px; border-radius: 6px; vertical-align: middle; color: #98a2b3; cursor: pointer; opacity: 0; }
     #pd9-hub-sorted tr:hover .pd9-pin-btn, #pd9-hub-sorted .pd9-pin-btn:focus-visible, #pd9-hub-sorted .pd9-pin-btn.pd9-pin-on { opacity: 1; }
     #pd9-hub-sorted .pd9-pin-btn:hover { background: rgba(16, 24, 40, .07); color: #1d2433; }
@@ -5660,6 +5734,14 @@
     .pd9-tag-edit .pd9-te-note:empty { display: none; }
     .pd9-tag-edit .pd9-te-bad { color: #b42318; }
     .pd9-tag-edit.pd9-te-busy .pd9-te-list, .pd9-tag-edit.pd9-te-busy .pd9-te-on { opacity: .5; pointer-events: none; }
+    /* Dark mode: invert the page, then flip pictures and file previews back */
+    html.pd9-dark { background: #fff !important; filter: invert(1) hue-rotate(180deg) contrast(.86) brightness(1.06); }
+    html.pd9-dark img, html.pd9-dark video, html.pd9-dark picture, html.pd9-dark canvas,
+    html.pd9-dark [style*="background-image"], html.pd9-dark .fvs-avatar, html.pd9-dark .pd9-av,
+    html.pd9-dark #pd9-docprev iframe, html.pd9-dark .pd9-bc-frame iframe { filter: invert(1) hue-rotate(180deg); }
+    html.pd9-dark #pd9-docprev iframe { filter: invert(1) hue-rotate(180deg) brightness(.94); }
+    html.pd9-dark .pd9-av img, html.pd9-dark .fvs-avatar img, html.pd9-dark [style*="background-image"] img { filter: none; }
+    .pd9-dark-btn { padding-left: 8px !important; padding-right: 8px !important; }
     .pd9-ver { margin-left: 4px; font-size: .85em; font-weight: 400; opacity: .5; }
     .fvqn-toast {
       position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
