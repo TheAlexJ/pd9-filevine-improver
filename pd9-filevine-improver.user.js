@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PD9 Filevine Improver
 // @namespace    https://filevine.local/pd9-improver
-// @version      3.88.0
+// @version      3.89.0
 // @description  Faster notes, tasks, and case closing in Filevine for PD9.
 // @match        https://*.filevine.com/*
 // @match        https://*.filevineapp.com/*
@@ -1538,13 +1538,13 @@
   // Ctrl/Cmd/Shift/middle click still open a new tab the normal way.
   function wireCaseLink(a, id, title, onOpen) {
     a.href = `#/project/${encodeURIComponent(id)}/activity`;
-    a.addEventListener('mouseenter', () => { if (!IN_FRAME && windowMode()) prefetchCase(id); });
+    a.addEventListener('mouseenter', () => { if (!IN_FRAME && windowMode() && onHub()) prefetchCase(id); });
     a.addEventListener('mouseleave', () => clearTimeout(prefetchTimer));
     a.addEventListener('click', (e) => {
       if (e.button !== 0 || e.ctrlKey || e.metaKey || e.shiftKey || e.altKey) return;
       e.preventDefault();
       if (onOpen) onOpen();
-      if (!IN_FRAME && windowMode()) openCaseWindow(String(id), title || `Case ${id}`);
+      if (!IN_FRAME && windowMode() && onHub()) openCaseWindow(String(id), title || `Case ${id}`);
       else if (!IN_FRAME && onHub()) window.open(`${location.origin}${location.pathname}#/project/${encodeURIComponent(id)}/activity`, CASE_TAB);
       else location.hash = `#/project/${encodeURIComponent(id)}/activity`;
       rememberRecent(id);
@@ -3366,16 +3366,38 @@
   const windowMode = () => store.get(WIN_MODE_KEY, false);
   let winZ = 100010;
 
-  const winState = () => { try { return JSON.parse(sessionStorage.getItem(WIN_LIST_KEY) || '[]'); } catch (e) { return []; } };
+  // Case windows belong to the Project Hub tab that made them. A new tab opened from
+  // that tab gets a copy of its session storage, so the list is marked with this
+  // tab's own name and a new tab (with a different name) never brings them back.
+  function hubTabId() {
+    if (!/^pd9-hub-/.test(window.name || '')) window.name = `pd9-hub-${Math.random().toString(36).slice(2)}`;
+    return window.name;
+  }
+  const winState = () => {
+    try {
+      const saved = JSON.parse(sessionStorage.getItem(WIN_LIST_KEY) || 'null');
+      if (!saved || Array.isArray(saved) || saved.tab !== window.name) return []; // not this tab's windows
+      return saved.list || [];
+    } catch (e) { return []; }
+  };
   function saveWindows() {
     const list = [...document.querySelectorAll('.pd9-win:not(.pd9-win-spare)')].map((w) => {
       const r = w.getBoundingClientRect();
       return { id: w.dataset.pid, title: w.dataset.title, href: w.dataset.href || '', auto: w.dataset.auto || '', min: w.classList.contains('pd9-win-min'), max: w.classList.contains('pd9-win-max'),
         box: w.dataset.box ? JSON.parse(w.dataset.box) : { left: r.left, top: r.top, width: r.width, height: r.height }, z: +w.style.zIndex || 0 };
     });
-    try { sessionStorage.setItem(WIN_LIST_KEY, JSON.stringify(list)); } catch (e) { /* ignore */ }
+    try { sessionStorage.setItem(WIN_LIST_KEY, JSON.stringify({ tab: hubTabId(), list })); } catch (e) { /* ignore */ }
   }
 
+  // Where the bar sits along the bottom: its center, as a share of the screen width.
+  const TASKBAR_KEY = 'pd9-taskbar-x';
+  function placeTaskbar(bar, x) {
+    const half = (bar.offsetWidth / 2) / window.innerWidth;
+    const min = Math.min(0.5, half + 8 / window.innerWidth), max = Math.max(0.5, 1 - half - 8 / window.innerWidth);
+    const v = Math.min(Math.max(Number.isFinite(x) ? x : 0.5, min), max);
+    bar.dataset.x = String(v);
+    bar.style.left = `${(v * 100).toFixed(2)}%`;
+  }
   function taskbar() {
     let bar = document.getElementById('pd9-taskbar');
     if (!bar) {
@@ -3384,6 +3406,7 @@
       bar.setAttribute('role', 'toolbar');
       bar.setAttribute('aria-label', 'Open case windows');
       document.body.appendChild(bar);
+      window.addEventListener('resize', () => placeTaskbar(bar, store.get(TASKBAR_KEY, 0.5)));
     }
     return bar;
   }
@@ -3392,7 +3415,32 @@
     const wins = [...document.querySelectorAll('.pd9-win:not(.pd9-win-spare)')];
     bar.hidden = !wins.length;
     bar.textContent = '';
+    requestAnimationFrame(() => placeTaskbar(bar, store.get(TASKBAR_KEY, 0.5)));
     const top = wins.filter((w) => !w.classList.contains('pd9-win-min')).sort((a, b) => b.style.zIndex - a.style.zIndex)[0];
+    // Grip: drag to slide the bar left or right along the bottom. Double-click to center it.
+    const grip = document.createElement('span');
+    grip.className = 'pd9-task-grip';
+    grip.title = 'Drag to move the bar. Double-click to center it.';
+    grip.setAttribute('aria-hidden', 'true');
+    grip.addEventListener('pointerdown', (e) => {
+      if (e.button !== 0) return;
+      e.preventDefault();
+      const r = bar.getBoundingClientRect();
+      const dx = e.clientX - (r.left + r.width / 2);
+      grip.setPointerCapture(e.pointerId);
+      bar.classList.add('pd9-task-dragging');
+      const move = (ev) => placeTaskbar(bar, (ev.clientX - dx) / window.innerWidth);
+      const up = () => {
+        grip.removeEventListener('pointermove', move);
+        grip.removeEventListener('pointerup', up);
+        bar.classList.remove('pd9-task-dragging');
+        store.set(TASKBAR_KEY, +bar.dataset.x);
+      };
+      grip.addEventListener('pointermove', move);
+      grip.addEventListener('pointerup', up);
+    });
+    grip.addEventListener('dblclick', () => { placeTaskbar(bar, 0.5); store.set(TASKBAR_KEY, 0.5); });
+    bar.appendChild(grip);
     // Home: minimize every window and show the page underneath.
     const home = document.createElement('button');
     home.type = 'button';
@@ -3467,7 +3515,7 @@
   // Keep a couple of spares ready, warming one at a time so they don't slow each other down.
   const SPARE_POOL = 2;
   function makeSpare() {
-    if (IN_FRAME || !windowMode()) return;
+    if (IN_FRAME || !windowMode() || !onHub()) return;
     const spares = document.querySelectorAll('.pd9-win-spare');
     if (spares.length >= SPARE_POOL || [...spares].some((x) => x.dataset.warm !== '1')) return; // full, or one still warming
     const w = openCaseWindow('', 'Spare', null, true);
@@ -3506,8 +3554,8 @@
       try { spare.querySelector('iframe').contentWindow.location.hash = `#/project/${encodeURIComponent(id)}/activity`; } catch (e) { /* ignore */ }
     }, 120);
   }
-  setInterval(() => { if (!IN_FRAME && windowMode()) makeSpare(); }, 15000);
-  setTimeout(() => { if (!IN_FRAME && windowMode()) makeSpare(); }, 2500); // start warming soon after the page loads
+  setInterval(() => { if (!IN_FRAME && windowMode() && onHub()) makeSpare(); }, 15000);
+  setTimeout(() => { if (!IN_FRAME && windowMode() && onHub()) makeSpare(); }, 2500); // start warming soon after the page loads
 
   function openCaseWindow(id, title, restore, spare = false) {
     const existing = document.querySelector(`.pd9-win:not(.pd9-win-spare)[data-pid="${CSS.escape(String(id))}"]`);
@@ -3660,7 +3708,10 @@
 
   let windowsRestored = false;
   function keepCaseWindows() {
-    if (windowsRestored) return;
+    // Windows, ready windows, and the bar only show on the Project Hub. Elsewhere in
+    // this tab they're hidden (and come back when you return to the hub).
+    document.documentElement.classList.toggle('pd9-off-hub', !onHub());
+    if (windowsRestored || !onHub()) return;
     windowsRestored = true;
     winState().sort((a, b) => (a.z || 0) - (b.z || 0)).forEach((x) => openCaseWindow(x.id, x.title, x));
     const top = [...document.querySelectorAll('.pd9-win:not(.pd9-win-spare):not(.pd9-win-min)')].sort((a, b) => b.style.zIndex - a.style.zIndex)[0];
@@ -4947,6 +4998,13 @@
       border-radius: 12px; box-shadow: 0 0 0 1px rgba(16, 24, 40, .1), 0 10px 30px -10px rgba(16, 24, 40, .4);
     }
     #pd9-taskbar[hidden] { display: none; }
+    .pd9-off-hub .pd9-win, .pd9-off-hub #pd9-taskbar { display: none !important; }
+    .pd9-task-grip { flex: none; width: 10px; margin: 2px 0 2px 2px; border-radius: 4px; cursor: grab; touch-action: none;
+      background: radial-gradient(circle, #98a2b3 1.2px, transparent 1.6px) 0 0 / 5px 5px; opacity: .7; }
+    .pd9-task-grip:hover { opacity: 1; }
+    #pd9-taskbar.pd9-task-dragging { cursor: grabbing; }
+    #pd9-taskbar.pd9-task-dragging .pd9-task-grip { cursor: grabbing; }
+
     .pd9-task-home { flex: none; display: grid; place-items: center; width: 32px; height: 30px; border: 0; border-radius: 8px; background: transparent; color: #475467; cursor: pointer; }
     .pd9-task-home:hover { background: rgba(16, 24, 40, .07); color: #1d2433; }
     .pd9-task-sep { flex: none; width: 1px; margin: 4px 2px; background: #e4e7ec; }
