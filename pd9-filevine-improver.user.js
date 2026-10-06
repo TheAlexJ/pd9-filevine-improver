@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PD9 Filevine Improver
 // @namespace    https://filevine.local/pd9-improver
-// @version      3.89.0
+// @version      3.92.0
 // @description  Faster notes, tasks, and case closing in Filevine for PD9.
 // @match        https://*.filevine.com/*
 // @match        https://*.filevineapp.com/*
@@ -788,6 +788,8 @@
           <button type="button" class="pd9-btn pd9-import" title="Add templates from a file">Import</button>
           <input type="file" class="pd9-file" accept=".json,application/json" hidden>
           <span class="pd9-grow"></span>
+          <label class="pd9-zoomopt" title="How big things look inside case windows. Auto shrinks them to fit when Windows display scaling is above 100%.">Case window zoom
+            <select class="pd9-zoomsel">${WIN_ZOOM_CHOICES.map(([v, t]) => `<option value="${v}">${t}</option>`).join('')}</select></label>
           <button type="button" class="pd9-btn pd9-cancel">Cancel</button>
           <button type="button" class="pd9-btn pd9-primary pd9-save">Save</button>
         </div>
@@ -795,6 +797,15 @@
     document.body.appendChild(overlay);
 
     const q = (s) => overlay.querySelector(s);
+    const zoomSel = q('.pd9-zoomsel');
+    zoomSel.value = String(store.get(WIN_ZOOM_KEY, 'auto'));
+    if (!zoomSel.value) zoomSel.value = 'auto';
+    // Takes effect right away (it's not part of the templates' Save).
+    zoomSel.addEventListener('change', () => {
+      store.set(WIN_ZOOM_KEY, zoomSel.value);
+      applyWinZoom();
+      toast(zoomSel.value === 'auto' ? `Case windows: Auto (${Math.round(winZoom() * 100)}% on this screen)` : `Case windows: ${zoomSel.selectedOptions[0].textContent}`);
+    });
     const ul = q('.pd9-list');
     const f = { label: q('[name=label]'), subject: q('[name=subject]'), tag: q('[name=tag]'), body: q('[name=body]') };
     const hk = q('[name=hotkey]');
@@ -2771,7 +2782,26 @@
     { key: 'next', label: 'Next Event', width: 170, sort: (r) => { const e = nextOf(r); return e ? e.when.getTime() : null; } },
     { key: 'event', label: 'Event', width: 220, sort: (r) => { const e = nextOf(r); return e && e.title ? shortTitle(e.title).toLowerCase() : null; } },
     { key: 'tags', label: 'Tags', width: 260, sort: (r) => (r.tags.length ? r.tags.map((t) => t.name).join(' ').toLowerCase() : null) },
+    { key: 'charges', label: 'Charges', width: 150, sort: (r) => { const n = knownCharges(r.id); return n ? n.length : null; } },
   ];
+
+  // ---------- Pinned cases (PD9 table) ----------
+  // Your own pins, kept by Tampermonkey. Pinned cases stay at the top of the table.
+  const PIN_KEY = 'pd9-hub-pins';
+  const pinSet = () => new Set((store.get(PIN_KEY, []) || []).map(String));
+  const isPinned = (id) => pinSet().has(String(id));
+  function togglePin(id) {
+    const pins = pinSet();
+    if (pins.has(String(id))) pins.delete(String(id)); else pins.add(String(id));
+    store.set(PIN_KEY, [...pins]);
+  }
+
+  // Charges we already know from Case Summary (from the search panels' cache), or null.
+  function knownCharges(id) {
+    const x = extraCache.get(id) || extraCache.get(String(id));
+    if (!x || x.charges === undefined || x.charges === 'n/a') return null;
+    return String(x.charges).split('\n').filter(Boolean);
+  }
 
   function ownLayout() {
     const saved = store.get(HUB_LAYOUT_KEY, null) || {};
@@ -3044,6 +3074,36 @@
         if (e) td.title = [e.title, e.location].filter(Boolean).join('\n'); // full name on hover
         break;
       case 'tags': r.tags.forEach((t) => td.appendChild(tagChip(t))); td.classList.add('pd9-own-tags'); break;
+      case 'charges': {
+        // Same as Advanced Search: click for the full table from the Charges tab.
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'pd9-charges-btn';
+        const known = knownCharges(r.id);
+        btn.textContent = known && known.length ? `View ${known.length} charge${known.length === 1 ? '' : 's'}` : 'View charges';
+        if (known && known.length) btn.title = known.join('\n');
+        btn.addEventListener('click', async (ev) => {
+          ev.stopPropagation();
+          const d = { name: r.defendant || r.clientName || '', caseNo: r.caseNo || '' };
+          let list = knownCharges(r.id);
+          if (!list) {
+            // Get the Case Summary list too, as a backup if the Charges tab is empty.
+            btn.disabled = true;
+            const was = btn.textContent;
+            btn.textContent = 'Loading...';
+            try {
+              const obj = await loadCaseSummary(r.id);
+              list = String(pickField(obj, 'charges') || '').split(/\r?\n/).map((c) => c.trim()).filter(Boolean);
+            } catch (e) { list = []; }
+            btn.disabled = false;
+            btn.textContent = list.length ? `View ${list.length} charge${list.length === 1 ? '' : 's'}` : was;
+            if (list.length) btn.title = list.join('\n');
+          }
+          showCharges(d, list, r.id);
+        });
+        td.appendChild(btn);
+        break;
+      }
       default: break;
     }
   }
@@ -3055,7 +3115,14 @@
     const cols = layout.order.map((k) => OWN_COLS.find((c) => c.key === k));
     const sort = store.get(HUB_SORT_KEY, null) || { col: 'next', dir: 'asc' };
     const col = OWN_COLS.find((c) => c.key === sort.col) || OWN_COLS[3];
-    const rows = hubTable.rows.filter(passesTagFilter).sort((a, b) => {
+    // Hook for the separate PD9 Manager script: it sets data-pd9-county="OS" on the page
+    // to show only cases whose number ends in that county code. Nothing happens without it.
+    const county = (document.documentElement.getAttribute('data-pd9-county') || '').toUpperCase();
+    const inCounty = (r) => !county || String(r.caseNo || '').toUpperCase().replace(/[^A-Z0-9]/g, '').endsWith(county);
+    const pins = pinSet();
+    const rows = hubTable.rows.filter((r) => passesTagFilter(r) && inCounty(r)).sort((a, b) => {
+      const pa = pins.has(String(a.id)), pb = pins.has(String(b.id));
+      if (pa !== pb) return pa ? -1 : 1; // pinned cases always on top
       const x = col.sort(a), y = col.sort(b);
       if (x === null && y === null) return 0;
       if (x === null) return 1; // nothing to sort on: always at the bottom
@@ -3069,9 +3136,9 @@
     wrap.textContent = '';
     const table = document.createElement('table');
     const colgroup = document.createElement('colgroup');
-    const pickCol = document.createElement('col'); pickCol.style.width = '40px'; colgroup.appendChild(pickCol);
+    const pickCol = document.createElement('col'); pickCol.style.width = '64px'; colgroup.appendChild(pickCol);
     cols.forEach((c) => { const el = document.createElement('col'); el.style.width = `${layout.widths[c.key] || c.width}px`; el.dataset.key = c.key; colgroup.appendChild(el); });
-    table.style.width = `${40 + cols.reduce((n, c) => n + (layout.widths[c.key] || c.width), 0)}px`;
+    table.style.width = `${64 + cols.reduce((n, c) => n + (layout.widths[c.key] || c.width), 0)}px`;
 
     const head = document.createElement('tr');
     // Select all (the rows showing, so it respects the tag filter).
@@ -3190,6 +3257,18 @@
         drawOwnTable(ov);
       });
       pick.appendChild(cb);
+      const pinned = pins.has(String(r.id));
+      if (pinned) tr.classList.add('pd9-pinned-row');
+      if (pinned && !(rows[i + 1] && pins.has(String(rows[i + 1].id)))) tr.classList.add('pd9-pin-last');
+      const pinBtn = document.createElement('button');
+      pinBtn.type = 'button';
+      pinBtn.className = `pd9-pin-btn${pinned ? ' pd9-pin-on' : ''}`;
+      pinBtn.title = pinned ? 'Unpin' : 'Pin to the top';
+      pinBtn.setAttribute('aria-label', `${pinned ? 'Unpin' : 'Pin'} ${r.caseNo || ''}`);
+      pinBtn.setAttribute('aria-pressed', String(pinned));
+      pinBtn.innerHTML = '<svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true"><path d="M9 4h6l-1 6 3 3v2h-4v5l-1 1-1-1v-5H7v-2l3-3z" fill="' + (pinned ? 'currentColor' : 'none') + '" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg>';
+      pinBtn.addEventListener('click', (e) => { e.stopPropagation(); togglePin(r.id); drawOwnTable(ov); });
+      pick.appendChild(pinBtn);
       tr.appendChild(pick);
       for (const c of cols) { const td = document.createElement('td'); td.dataset.key = c.key; cellFor(c.key, r, td); tr.appendChild(td); }
       tbody.appendChild(tr);
@@ -3201,7 +3280,8 @@
     const soon = rows.filter((r) => { const e = nextOf(r); return e && e.when - Date.now() < 3 * 864e5; }).length;
     const tf = tagFilter();
     const status = ov.querySelector('.pd9-hs-status');
-    status.textContent = (tf.tags.length || tf.not.length ? `${rows.length} of ${hubTable.rows.length} projects` : `${rows.length} projects`) + (soon ? `, ${soon} with an event in the next 3 days` : '');
+    const nPins = rows.filter((r) => pins.has(String(r.id))).length;
+    status.textContent = (tf.tags.length || tf.not.length || county ? `${rows.length} of ${hubTable.rows.length} projects` : `${rows.length} projects`) + (nPins ? `, ${nPins} pinned` : '') + (soon ? `, ${soon} with an event in the next 3 days` : '');
     let act = ov.querySelector('.pd9-bulk-bar');
     if (!act) { act = document.createElement('span'); act.className = 'pd9-bulk-bar'; ov.querySelector('.pd9-hs-bar').appendChild(act); }
     act.textContent = '';
@@ -3344,6 +3424,8 @@
       buildOwnTable(ov); // filters changed
     }
   }
+
+  document.addEventListener('pd9-redraw-table', () => { const ov = document.getElementById('pd9-hub-sorted'); if (ov) drawOwnTable(ov); });
 
   // Clicking the Next Event header in Filevine's table opens our table sorted by it.
   function openNextEventSort() {
@@ -3492,6 +3574,31 @@
   function minimizeWindow(w) { w.classList.add('pd9-win-min'); w.classList.remove('pd9-win-focus'); drawTaskbar(); saveWindows(); }
   function closeWindow(w) { recycleWindow(w); drawTaskbar(); saveWindows(); }
   function toggleMax(w) { w.classList.toggle('pd9-win-max'); placeWin(w); saveWindows(); }
+
+  // ---------- Case window zoom (for Windows display scaling like 125%) ----------
+  // With Windows set to 125% or 150%, the screen has fewer page pixels, so Filevine
+  // inside a case window gets squeezed into its narrow layout. "Auto" draws the
+  // window's contents smaller by the same amount, so they lay out like at 100%.
+  const WIN_ZOOM_KEY = 'pd9-win-zoom';
+  const WIN_ZOOM_CHOICES = [['auto', 'Auto'], ['1', '100%'], ['0.9', '90%'], ['0.8', '80%'], ['0.75', '75%'], ['0.67', '67%']];
+  const onWindowsPc = () => {
+    try { if (navigator.userAgentData && navigator.userAgentData.platform) return /windows/i.test(navigator.userAgentData.platform); } catch (e) { /* fall back */ }
+    return /win/i.test(navigator.platform || '') || /windows/i.test(navigator.userAgent || '');
+  };
+  function winZoom() {
+    const pick = String(store.get(WIN_ZOOM_KEY, 'auto'));
+    if (pick !== 'auto') return Math.min(1, Math.max(0.5, +pick || 1));
+    const dpr = window.devicePixelRatio || 1;
+    if (!onWindowsPc() || dpr < 1.05) return 1;
+    return Math.max(0.67, Math.round((1 / dpr) * 100) / 100);
+  }
+  function applyWinZoom() {
+    if (IN_FRAME) return;
+    document.documentElement.style.setProperty('--pd9-z', String(winZoom()));
+  }
+  applyWinZoom();
+  // Moving the browser to another screen, or changing browser zoom, changes the scaling.
+  window.addEventListener('resize', () => applyWinZoom());
 
   function placeWin(w) {
     if (w.classList.contains('pd9-win-max')) { ['left', 'top', 'width', 'height'].forEach((k) => { w.style[k] = ''; }); return; }
@@ -3743,7 +3850,7 @@
     if (e.key !== ACTIVE_KEY || !e.newValue) return;
     if (Date.now() - +e.newValue > 60000 || Date.now() - lastNudge < 15000) return;
     lastNudge = Date.now();
-    const opts = { bubbles: true, cancelable: false, view: window, clientX: 1, clientY: 1 };
+    const opts = { bubbles: true, cancelable: false, clientX: 1, clientY: 1 };
     document.dispatchEvent(new MouseEvent('mousemove', opts));
     window.dispatchEvent(new MouseEvent('mousemove', opts));
     document.dispatchEvent(new Event('scroll', { bubbles: true }));
@@ -4649,6 +4756,8 @@
     form.project-item-edit-form:has([name^="sentencetype"]):has([name^="dispositionaction"]) .custom-item-body > .flex-grid > .form-group.row > .custom-field:has([name^="dispositionnotes"]) { order: 120; }
     form.project-item-edit-form:has([name^="sentencetype"]):has([name^="dispositionaction"]) .custom-item-body > .flex-grid > .form-group.row > .custom-field:has(textarea) { flex-basis: 100% !important; max-width: 100% !important; width: 100% !important; }
     /* ---------- Improver Options window ---------- */
+    .pd9-zoomopt { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; color: #475467; margin-right: 6px; white-space: nowrap; }
+    .pd9-zoomopt select { font: inherit; padding: 4px 6px; border: 1px solid #d0d5dd; border-radius: 6px; background: #fff; }
     .pd9-overlay {
       position: fixed; inset: 0; z-index: 100000; display: flex; align-items: center; justify-content: center;
       background: rgba(0, 0, 0, .45); padding: 16px;
@@ -4812,13 +4921,13 @@
     #pd9-adv .pd9-closed { opacity: .7; }
     #pd9-adv .pd9-open { font-weight: 600; }
     .pd9-grow { flex: 1; }
-    #pd9-adv .pd9-charges-btn {
+    #pd9-adv .pd9-charges-btn, #pd9-hub-sorted .pd9-charges-btn {
       all: unset; cursor: pointer; display: inline-flex; align-items: center; gap: 4px; white-space: nowrap;
       color: #2b7a78; font-weight: 600; font-size: 13px; text-decoration: underline; text-underline-offset: 3px;
     }
-    #pd9-adv .pd9-charges-btn::after { content: "›"; font-size: 15px; line-height: 1; text-decoration: none; }
-    #pd9-adv .pd9-charges-btn:hover { background: var(--t-color-object-1-secondary, #eef2f7); }
-    #pd9-adv .pd9-charges-btn:focus-visible { outline: 2px solid var(--t-color-focus, #2563eb); outline-offset: 1px; }
+    #pd9-adv .pd9-charges-btn::after, #pd9-hub-sorted .pd9-charges-btn::after { content: "›"; font-size: 15px; line-height: 1; text-decoration: none; }
+    #pd9-adv .pd9-charges-btn:hover, #pd9-hub-sorted .pd9-charges-btn:hover { background: var(--t-color-object-1-secondary, #eef2f7); }
+    #pd9-adv .pd9-charges-btn:focus-visible, #pd9-hub-sorted .pd9-charges-btn:focus-visible { outline: 2px solid var(--t-color-focus, #2563eb); outline-offset: 1px; }
     .pd9-charges-modal { z-index: 100002 !important; }
     .pd9-charges-modal .pd9-charges-dialog { width: min(980px, 100%); }
     .pd9-charges-modal .pd9-charges-wrap { overflow: auto; max-height: 55vh; border: 1px solid var(--t-color-border, #dfe3e8); border-radius: 6px; }
@@ -4985,8 +5094,8 @@
     .pd9-win-btn:hover { background: rgba(16, 24, 40, .07); color: #1d2433; }
     .pd9-win-x:hover { background: #fee4e2; color: #b42318; }
     .pd9-win-btn:focus-visible { outline: 2px solid #1f7a77; outline-offset: 1px; }
-    .pd9-win-body { position: relative; flex: 1; }
-    .pd9-win-body iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; background: #fff; }
+    .pd9-win-body { position: relative; flex: 1; overflow: hidden; }
+    .pd9-win-body iframe { position: absolute; left: 0; top: 0; width: calc(100% / var(--pd9-z, 1)); height: calc(100% / var(--pd9-z, 1)); border: 0; background: #fff; transform: scale(var(--pd9-z, 1)); transform-origin: 0 0; }
     .pd9-win-busy .pd9-win-body iframe { pointer-events: none; }
     .pd9-win-busy, .pd9-win-busy * { user-select: none !important; }
     .pd9-win-grip { position: absolute; right: 0; bottom: 0; width: 18px; height: 18px; cursor: nwse-resize;
@@ -5021,7 +5130,14 @@
     .pd9-task-x:hover { opacity: 1; background: #fee4e2; color: #b42318; }
     .pd9-task-home:focus-visible, .pd9-task-name:focus-visible, .pd9-task-x:focus-visible { outline: 2px solid #1f7a77; outline-offset: 1px; }
     /* Selecting cases in the PD9 table */
-    #pd9-hub-sorted .pd9-pick { width: 40px; padding: 0 0 0 14px !important; text-align: left; cursor: default; }
+    #pd9-hub-sorted .pd9-pick { width: 64px; padding: 0 0 0 14px !important; text-align: left; cursor: default; white-space: nowrap; }
+    #pd9-hub-sorted .pd9-pin-btn { all: unset; display: inline-grid; place-items: center; width: 24px; height: 24px; margin-left: 6px; border-radius: 6px; vertical-align: middle; color: #98a2b3; cursor: pointer; opacity: 0; }
+    #pd9-hub-sorted tr:hover .pd9-pin-btn, #pd9-hub-sorted .pd9-pin-btn:focus-visible, #pd9-hub-sorted .pd9-pin-btn.pd9-pin-on { opacity: 1; }
+    #pd9-hub-sorted .pd9-pin-btn:hover { background: rgba(16, 24, 40, .07); color: #1d2433; }
+    #pd9-hub-sorted .pd9-pin-btn.pd9-pin-on { color: #1f7a77; }
+    #pd9-hub-sorted .pd9-pin-btn:focus-visible { outline: 2px solid #1f7a77; outline-offset: 1px; }
+    #pd9-hub-sorted tr.pd9-pinned-row td { background: #f3faf9; }
+    #pd9-hub-sorted tr.pd9-pin-last td { box-shadow: inset 0 -2px 0 #cfe6e3; }
     #pd9-hub-sorted .pd9-pick input { width: 15px; height: 15px; margin: 0; accent-color: var(--accent); cursor: pointer; vertical-align: middle; }
     #pd9-hub-sorted tbody tr.pd9-picked { background: #e8f3f2 !important; }
     #pd9-hub-sorted .pd9-bulk-bar { display: inline-flex; align-items: center; gap: 8px; margin-left: auto; }
