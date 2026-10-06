@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PD9 Filevine Improver
 // @namespace    https://filevine.local/pd9-improver
-// @version      3.79.0
+// @version      3.88.0
 // @description  Faster notes, tasks, and case closing in Filevine for PD9.
 // @match        https://*.filevine.com/*
 // @match        https://*.filevineapp.com/*
@@ -21,6 +21,9 @@
   // Inside a case window (Window mode), Filevine runs in a frame. There we keep the
   // note and task tools but skip the page-level extras (search windows, hub table).
   const IN_FRAME = (() => { try { return window.top !== window.self; } catch (e) { return true; } })();
+  // Only run in frames the script made itself (case windows, ready windows, and the
+  // multi-case worker). Filevine's own hidden frames don't need it, so stop there.
+  if (IN_FRAME && !/^pd9-/.test(window.name || '')) return;
 
 
 
@@ -364,6 +367,16 @@
 
   async function openFloating(type = 'note') {
     let form = $(SEL.docked);
+    // Minimized (for example by Esc)? Bring that box back up, with its text, instead of starting a new one.
+    if (form && isVisible(form) && !isVisible($(SEL.message, form))) {
+      const restore = $('[data-testid="activity-creator-minimize-button"], [data-testid*="maximize"], [data-testid*="expand"]', form)
+        || $('.header', form);
+      if (restore) {
+        restore.click();
+        await waitFor(() => isVisible($(SEL.message, form)), 1500);
+        refreshComposer(form);
+      }
+    }
     if (!form || !isVisible($(SEL.message, form))) {
       const btn = $(SEL.createBtn);
       if (!btn) { toast('Could not find the Create Activity button.'); return null; }
@@ -512,7 +525,7 @@
   window.addEventListener('click', (e) => {
     if (!HUB_OPENS_TO || !onHub()) return;
     if (e.button !== 0 || e.ctrlKey || e.metaKey || e.shiftKey || e.altKey) return; // new tab etc. use the link
-    if (e.target.closest && e.target.closest('#pd9-hub-sorted')) return; // the PD9 table handles its own links
+    if (e.target.closest && e.target.closest('#pd9-hub-sorted, #pd9-case, #pd9-adv, #pd9-switch')) return; // the script's own lists handle their links
     const hit = hubCaseId(e.target);
     if (!hit) return;
     e.preventDefault();
@@ -711,7 +724,14 @@
       el.removeAttribute('id');
       el.removeAttribute('href');
       el.removeAttribute('data-testid');
-      if (el.childElementCount === 0 && el.textContent.trim() === 'Filevine Settings') el.textContent = 'Improver Options';
+      if (el.childElementCount === 0 && el.textContent.trim() === 'Filevine Settings') {
+        el.textContent = 'Improver Options ';
+        // The version, small and grey, for when someone needs help ("which version do you have?").
+        const v = document.createElement('span');
+        v.className = 'pd9-ver';
+        v.textContent = `(v${typeof GM_info !== 'undefined' ? GM_info.script.version : '?'})`;
+        el.appendChild(v);
+      }
     }
     mine.addEventListener('click', (e) => {
       e.preventDefault();
@@ -1511,6 +1531,40 @@
     }, true), 0);
   }
 
+  // ---------- open a case the fast way (search results) ----------
+  // Same speed-ups as the PD9 table: Window mode opens a case window (from a warm
+  // spare, preloaded on hover); on the Project Hub it uses the one shared case tab;
+  // anywhere else it switches the tab you're in (Filevine is already loaded).
+  // Ctrl/Cmd/Shift/middle click still open a new tab the normal way.
+  function wireCaseLink(a, id, title, onOpen) {
+    a.href = `#/project/${encodeURIComponent(id)}/activity`;
+    a.addEventListener('mouseenter', () => { if (!IN_FRAME && windowMode()) prefetchCase(id); });
+    a.addEventListener('mouseleave', () => clearTimeout(prefetchTimer));
+    a.addEventListener('click', (e) => {
+      if (e.button !== 0 || e.ctrlKey || e.metaKey || e.shiftKey || e.altKey) return;
+      e.preventDefault();
+      if (onOpen) onOpen();
+      if (!IN_FRAME && windowMode()) openCaseWindow(String(id), title || `Case ${id}`);
+      else if (!IN_FRAME && onHub()) window.open(`${location.origin}${location.pathname}#/project/${encodeURIComponent(id)}/activity`, CASE_TAB);
+      else location.hash = `#/project/${encodeURIComponent(id)}/activity`;
+      rememberRecent(id);
+    });
+  }
+
+  // Filevine's answers, remembered for 5 minutes, so searching the same thing again is instant.
+  const suggestCache = new Map();
+
+  // Your own cases (the Project Hub list every tab shares) that match, shown instantly.
+  function myCaseHits(entry, mode) {
+    try { readSwitchCache(); } catch (e) { return []; }
+    const rows = switchList || [];
+    return rows.map((r) => ({ r, sc: switchScore(r, entry) }))
+      .filter((x) => x.sc >= (mode === 'case' ? 55 : 50))
+      .sort((a, b) => b.sc - a.sc || b.r.lastActivity - a.r.lastActivity)
+      .slice(0, 15)
+      .map(({ r }) => ({ id: r.id, title: `${r.name || ''} | ${r.caseNo}`, details: r.last ? `${r.last} \u00b7 your case` : 'Your case', mine: true }));
+  }
+
   // Ask Filevine's search directly (the same address its dropdown uses), with
   // archived cases included, and list only real matches. One request at a time,
   // no checkbox, none of the dropdown's bugs.
@@ -1519,11 +1573,40 @@
 
   async function askFilevine(query, signal, archived = true) {
     const url = `/api/suggest?q=${encodeURIComponent(query)}&onlyBillingEligible=false&archived=${archived ? 'true' : 'false'}`;
+    const cached = suggestCache.get(url);
+    if (cached && Date.now() - cached.at < 5 * 60 * 1000) return cached.data;
     const res = await fetch(url, { credentials: 'include', signal, headers: { Accept: 'application/json' } });
     if (!res.ok) throw new Error(`status ${res.status}`);
     const json = await res.json();
     if (!json || json.success === false || !Array.isArray(json.data)) throw new Error('unexpected reply');
-    return json.data.map((d) => ({ id: d.id, title: htmlToText(d.title), details: htmlToText(d.details), clientName: htmlToText(d.clientName), clientID: d.clientID || null, orgID: d.orgID || null }));
+    const data = json.data.map((d) => ({ id: d.id, title: htmlToText(d.title), details: htmlToText(d.details), clientName: htmlToText(d.clientName), clientID: d.clientID || null, orgID: d.orgID || null }));
+    suggestCache.set(url, { at: Date.now(), data });
+    if (suggestCache.size > 60) suggestCache.delete(suggestCache.keys().next().value);
+    return data;
+  }
+
+  function drawHitList(out, hits, panel, label) {
+    out.querySelectorAll('.pd9-case-list, .pd9-case-mine').forEach((x) => x.remove());
+    if (label) { const l = document.createElement('div'); l.className = 'pd9-case-mine'; l.textContent = label; out.appendChild(l); }
+    const list = document.createElement('ul');
+    list.className = 'pd9-case-list';
+    for (const h of hits) {
+      const li = document.createElement('li');
+      const a = document.createElement('a');
+      const t = document.createElement('span');
+      t.className = 'pd9-case-title';
+      t.textContent = h.title;
+      const d = document.createElement('span');
+      d.className = 'pd9-case-details';
+      d.textContent = h.details;
+      a.append(t, d);
+      if (h.mine) li.classList.add('pd9-hit-mine');
+      // Plain click: open it the fast way and close. Ctrl/Cmd/middle-click opens a new tab as usual.
+      wireCaseLink(a, h.id, `${(h.title.split('|')[1] || '').trim()}  ${(h.title.split('|')[0] || '').trim()}`.trim(), () => setTimeout(() => panel.remove(), 0));
+      li.appendChild(a);
+      list.appendChild(li);
+    }
+    out.appendChild(list);
   }
 
   async function searchDirect(entry, panel, m) {
@@ -1534,7 +1617,10 @@
     searchRequest = ctrl;
 
     const started = Date.now();
+    const mode = m === SEARCH_MODES.case ? 'case' : 'name';
+    const mine = myCaseHits(entry, mode);
     out.innerHTML = '<div class="pd9-case-status"><span class="pd9-spin" aria-hidden="true"></span><span class="pd9-case-wait">Searching, including archived...</span></div>';
+    if (mine.length) drawHitList(out, mine, panel, 'Your cases (instant)');
     const tick = setInterval(() => {
       const w = out.querySelector('.pd9-case-wait');
       if (w) w.textContent = `Searching, including archived... ${Math.round((Date.now() - started) / 1000)}s`;
@@ -1554,6 +1640,11 @@
       clearInterval(tick);
       go.disabled = false;
       if (err.name === 'AbortError') return;
+      if (mine.length) { // your cases are already showing; just say the rest didn't come
+        const st = out.querySelector('.pd9-case-status');
+        if (st) st.textContent = 'Filevine did not answer, so only your cases are shown.';
+        return;
+      }
       if (m.fallback) {
         panel.remove();
         toast('Direct search failed, using the search box instead.');
@@ -1576,25 +1667,11 @@
     head.textContent = hits.length ? `${hits.length} case${hits.length === 1 ? '' : 's'} found (${secs}s)` : `${m.none} (${secs}s)`;
     out.appendChild(head);
 
-    const list = document.createElement('ul');
-    list.className = 'pd9-case-list';
-    for (const h of hits) {
-      const li = document.createElement('li');
-      const a = document.createElement('a');
-      a.href = `#/project/${encodeURIComponent(h.id)}/activity`;
-      const t = document.createElement('span');
-      t.className = 'pd9-case-title';
-      t.textContent = h.title;
-      const d = document.createElement('span');
-      d.className = 'pd9-case-details';
-      d.textContent = h.details;
-      a.append(t, d);
-      // Plain click: go there and close. Ctrl/Cmd/middle-click opens a new tab as usual.
-      a.addEventListener('click', (e) => { if (!e.ctrlKey && !e.metaKey && !e.shiftKey && e.button === 0) setTimeout(() => panel.remove(), 0); });
-      li.appendChild(a);
-      list.appendChild(li);
-    }
-    out.appendChild(list);
+    // Your cases first (already shown instantly), then everything else Filevine found.
+    const mineIds = new Set(mine.map((x) => String(x.id)));
+    const merged = [...mine, ...hits.filter((h) => !mineIds.has(String(h.id)))];
+    head.textContent = merged.length ? `${merged.length} case${merged.length === 1 ? '' : 's'} found (${secs}s)` : `${m.none} (${secs}s)`;
+    drawHitList(out, merged, panel, '');
     if (gotBack >= 10) {
       const more = document.createElement('div');
       more.className = 'pd9-case-note';
@@ -1644,7 +1721,26 @@
   // Filevine loads Case Summary from /api/projects/<id>/custom/casesummary886.
   // Field names end in a number (apd10682), so we match the start of the name.
   const CASE_SUMMARY_SECTION = 'casesummary886';
-  const extraCache = new Map(); // project id -> { apd, userStatus }
+  const extraCache = new Map(); // project id -> { apd, userStatus, dob, disposition, charges }
+  // Kept in this browser for 30 minutes so repeat searches (in any tab) fill in instantly.
+  const EXTRA_KEY = 'pd9-extra-cache';
+  (function loadExtraCache() {
+    try {
+      const saved = JSON.parse(localStorage.getItem(EXTRA_KEY) || '{}');
+      const fresh = {};
+      for (const [id, v] of Object.entries(saved)) if (v && Date.now() - v.at < 30 * 60 * 1000) { extraCache.set(id, v.data); fresh[id] = v; }
+      localStorage.setItem(EXTRA_KEY, JSON.stringify(fresh)); // drop old ones
+    } catch (e) { /* ignore */ }
+  })();
+  function saveExtra(id, data) {
+    try {
+      const saved = JSON.parse(localStorage.getItem(EXTRA_KEY) || '{}');
+      saved[id] = { at: Date.now(), data };
+      const keys = Object.keys(saved);
+      if (keys.length > 300) keys.sort((a, b) => saved[a].at - saved[b].at).slice(0, keys.length - 300).forEach((k) => delete saved[k]);
+      localStorage.setItem(EXTRA_KEY, JSON.stringify(saved));
+    } catch (e) { /* ignore */ }
+  }
 
   function pickField(obj, name) {
     const key = Object.keys(obj || {}).find((k) => new RegExp(`^${name}\\d*$`, 'i').test(k));
@@ -1716,7 +1812,8 @@
   }
 
   async function loadExtra(hit, signal) {
-    if (extraCache.has(hit.id) && extraCache.get(hit.id).charges !== undefined) return extraCache.get(hit.id);
+    const cachedExtra = extraCache.get(hit.id) || extraCache.get(String(hit.id));
+    if (cachedExtra && cachedExtra.charges !== undefined) return cachedExtra;
     const extra = { apd: '', userStatus: '', dob: '', disposition: '', charges: '' };
     const [summary, dob, disposition] = await Promise.allSettled([
       loadCaseSummary(hit.id, signal), loadDob(hit, signal), loadDisposition(hit.id, signal),
@@ -1733,6 +1830,7 @@
     extra.dob = dob.status === 'fulfilled' ? dob.value : 'n/a';
     extra.disposition = disposition.status === 'fulfilled' ? (disposition.value || 'None entered') : 'n/a';
     extraCache.set(hit.id, extra);
+    if (![extra.apd, extra.dob, extra.disposition].includes('n/a')) saveExtra(String(hit.id), extra);
     return extra;
   }
 
@@ -2119,8 +2217,8 @@
         const charges = c.key === 'charges' ? text.split('\n').filter(Boolean) : null;
         if (c.link) {
           const a = document.createElement('a');
-          a.href = `#/project/${encodeURIComponent(h.id)}/activity`;
           a.textContent = text;
+          wireCaseLink(a, h.id, `${d.caseNo}  ${d.name}`.trim());
           td.appendChild(a);
         } else if (charges && !/^(\.\.\.)$/.test(text)) {
           // A small "Charges (N)" button. Click for the full table from the Charges tab.
@@ -2190,101 +2288,123 @@
 
   // ---------- move and resize Filevine's note/task box ----------
   // Drag the top bar of the box (not the icons or buttons) to move it. Drag the
-  // bottom-right corner to resize it. Double-click the top bar to put it back.
-  // Remembered for next time. When Filevine minimizes the box, it goes back to
-  // its normal spot so the minimized bar sits where you expect.
+  // bottom-right corner grip to resize it. Double-click the top bar to put it back.
+  // Remembered for next time.
+  // The position lives in a class and CSS variables, never in the box's own style,
+  // so Filevine's sizes stay untouched: when the box is minimized, the class comes
+  // off and the minimized bar looks and sits exactly the way Filevine draws it.
   const COMPOSER_KEY = 'pd9-composer-box';
-  const setImp = (el, prop, val) => (val == null ? el.style.removeProperty(prop) : el.style.setProperty(prop, val, 'important'));
 
   let composerBoxCache;
   const composerBox = () => (composerBoxCache === undefined ? (composerBoxCache = store.get(COMPOSER_KEY, null)) : composerBoxCache);
   const setComposerBox = (box) => { composerBoxCache = box; store.set(COMPOSER_KEY, box); };
   let lastPlaced = null; // { form, open, box } so we only touch the box when something changed
 
-  function placeComposer(form) {
-    const box = composerBox();
-    const open = isVisible($(SEL.message, form));
-    // Put Filevine's own position back (only if we changed it).
-    if (!box || !open) {
-      if (form.dataset.pd9Orig !== undefined) { form.style.cssText = form.dataset.pd9Orig; delete form.dataset.pd9Orig; }
-      return;
-    }
-    if (form.dataset.pd9Orig === undefined) form.dataset.pd9Orig = form.style.cssText;
+  function clampBox(box) {
     const vw = window.innerWidth, vh = window.innerHeight;
     const width = Math.min(Math.max(box.width, 380), vw - 16);
     const height = Math.min(Math.max(box.height, 260), vh - 16);
-    setImp(form, 'right', 'auto'); setImp(form, 'bottom', 'auto');
-    setImp(form, 'width', `${width}px`); setImp(form, 'height', `${height}px`); setImp(form, 'max-height', 'none');
-    setImp(form, 'left', `${Math.min(Math.max(box.left, 8 - width + 120), vw - 120)}px`);
-    setImp(form, 'top', `${Math.min(Math.max(box.top, 8), vh - 48)}px`);
+    return {
+      width, height,
+      left: Math.min(Math.max(box.left, 8 - width + 120), vw - 120),
+      top: Math.min(Math.max(box.top, 8), vh - 48),
+    };
+  }
+  function applyBox(form, box) {
+    const b = clampBox(box);
+    form.style.setProperty('--pd9-cl', `${b.left}px`);
+    form.style.setProperty('--pd9-ct', `${b.top}px`);
+    form.style.setProperty('--pd9-cw', `${b.width}px`);
+    form.style.setProperty('--pd9-ch', `${b.height}px`);
+    form.classList.add('pd9-placed');
+  }
+
+  function placeComposer(form) {
+    const box = composerBox();
+    const open = isVisible($(SEL.message, form));
+    // Our extras only while it's open. Minimized: Filevine's own look, untouched.
+    form.classList.toggle('pd9-movable', open);
+    if (!box || !open) { form.classList.remove('pd9-placed'); return; }
+    applyBox(form, box);
+  }
+
+  // Recheck right after the box is minimized or brought back (by Esc, N, or its own button).
+  function refreshComposer(form) {
+    [0, 120, 400].forEach((ms) => setTimeout(() => {
+      if (!form.isConnected) return;
+      placeComposer(form);
+      lastPlaced = { form, open: isVisible($(SEL.message, form)), box: composerBox() };
+    }, ms));
   }
 
   const composerReady = new WeakSet();
   function makeComposerMovable() {
     const form = $(SEL.docked);
     if (!form) return;
-    form.classList.add('pd9-movable');
     const open = isVisible($(SEL.message, form));
     if (!lastPlaced || lastPlaced.form !== form || lastPlaced.open !== open || lastPlaced.box !== composerBox()) {
       placeComposer(form);
       lastPlaced = { form, open, box: composerBox() };
     }
+    if (!form.querySelector(':scope > .pd9-composer-grip')) {
+      const g = document.createElement('span');
+      g.className = 'pd9-composer-grip';
+      g.setAttribute('aria-hidden', 'true');
+      g.title = 'Drag to resize';
+      form.appendChild(g);
+    }
     if (composerReady.has(form)) return;
     composerReady.add(form);
 
-    const saveBox = () => {
+    const current = () => { const r = form.getBoundingClientRect(); return { left: r.left, top: r.top, width: r.width, height: r.height }; };
+    const save = () => {
       if (!isVisible($(SEL.message, form))) return;
-      const r = form.getBoundingClientRect();
+      const r = current();
       setComposerBox({ left: Math.round(r.left), top: Math.round(r.top), width: Math.round(r.width), height: Math.round(r.height) });
+      lastPlaced = { form, open: true, box: composerBox() };
     };
     const isHandle = (t) => t.closest('.header') && !t.closest('button, [role="button"], input, select, textarea, a');
     let lastHandleDown = 0;
 
     form.addEventListener('pointerdown', (e) => {
-      if (e.button !== 0) return;
-      const r = form.getBoundingClientRect();
-      // Grabbing the resize corner: pin left/top first so it grows toward the corner.
-      if (e.clientX > r.right - 18 && e.clientY > r.bottom - 18) {
-        if (!composerBox()) { setComposerBox({ left: r.left, top: r.top, width: r.width, height: r.height }); placeComposer(form); }
-        return;
-      }
-      if (!isHandle(e.target)) return;
+      if (e.button !== 0 || !isVisible($(SEL.message, form))) return;
+      const grip = e.target.closest && e.target.closest('.pd9-composer-grip');
+      if (!grip && !isHandle(e.target)) return;
       e.preventDefault();
-      lastHandleDown = Date.now();
-      const dx = e.clientX - r.left, dy = e.clientY - r.top;
-      setComposerBox({ left: r.left, top: r.top, width: r.width, height: r.height });
-      placeComposer(form);
+      if (!grip) lastHandleDown = Date.now();
+      const start = current();
+      applyBox(form, start); // from here on, we own the position
+      const sx = e.clientX, sy = e.clientY;
       form.setPointerCapture(e.pointerId);
       form.classList.add('pd9-dragging');
       const move = (ev) => {
-        setImp(form, 'left', `${Math.min(Math.max(ev.clientX - dx, 8 - r.width + 120), window.innerWidth - 120)}px`);
-        setImp(form, 'top', `${Math.min(Math.max(ev.clientY - dy, 8), window.innerHeight - 48)}px`);
+        const b = grip
+          ? { ...start, width: start.width + ev.clientX - sx, height: start.height + ev.clientY - sy }
+          : { ...start, left: start.left + ev.clientX - sx, top: start.top + ev.clientY - sy };
+        applyBox(form, b);
       };
       const up = () => {
         form.removeEventListener('pointermove', move);
         form.removeEventListener('pointerup', up);
         form.removeEventListener('pointercancel', up);
         form.classList.remove('pd9-dragging');
-        saveBox();
+        save();
       };
       form.addEventListener('pointermove', move);
       form.addEventListener('pointerup', up);
       form.addEventListener('pointercancel', up);
     }, true);
 
+    // Its own minimize button (and anything else in the top bar) can change open/minimized.
+    form.addEventListener('click', (e) => { if (e.target.closest && e.target.closest('.header')) refreshComposer(form); });
+
     form.addEventListener('dblclick', () => {
       // (While dragging, the click lands on the box itself, so go by where the press started.)
       if (Date.now() - lastHandleDown > 800) return;
       setComposerBox(null);
       placeComposer(form);
+      lastPlaced = { form, open: true, box: null };
     });
-
-    let t = null;
-    new ResizeObserver(() => {
-      if (!composerBox() || form.classList.contains('pd9-dragging')) return;
-      clearTimeout(t);
-      t = setTimeout(saveBox, 250);
-    }).observe(form);
   }
 
   // ---------- Jail Search (Osceola cases only) ----------
@@ -2613,6 +2733,7 @@
       clientID: h.clientID,
       caseNo: (String(h.projectName || '').split('|')[1] || h.number || '').trim(),
       clientName: htmlToText(h.clientName || String(h.projectName || '').split('|')[0]),
+      picture: h.pictureUrl && !/default/i.test(h.pictureUrl) ? h.pictureUrl : '',
       lastActivity: h.lastActivity ? new Date(h.lastActivity) : null,
       // Tags with their Filevine color (tagsV2 has the color; hashtags is just the names).
       tags: (h.tagsV2 && h.tagsV2.length
@@ -2674,6 +2795,59 @@
     return d.toLocaleDateString([], { ...(weekday ? { weekday: 'short' } : {}), month: 'short', day: 'numeric', ...(sameYear ? {} : { year: 'numeric' }) });
   }
 
+  // ---------- client avatar circles (like Filevine's Project Hub) ----------
+  // Same initials (first and last name) and, where possible, the same color
+  // Filevine uses. Colors Filevine has already shown are remembered; for the
+  // rest, the script works out Filevine's color rule from the ones it has seen.
+  const AVATAR_KEY = 'pd9-avatar-colors';
+  let avatarRule = null; // { by: 'clientID' | 'id', mod, add } once worked out
+  function learnAvatarColors() {
+    if (!hubTable || !hubTable.rows) return;
+    const byId = new Map(hubTable.rows.map((r) => [r.id, r]));
+    const known = store.get(AVATAR_KEY, null) || {};
+    let added = false;
+    for (const row of document.querySelectorAll('.ag-row[row-id]')) {
+      const av = row.querySelector('[col-id="ProjectName"] .fvs-avatar');
+      const m = av && av.className.match(/fvs-avatar--color-(\d+)/);
+      const r = byId.get(row.getAttribute('row-id'));
+      if (!m || !r || !r.clientID) continue;
+      if (known[r.clientID] !== +m[1]) { known[r.clientID] = +m[1]; added = true; }
+    }
+    if (added) store.set(AVATAR_KEY, known);
+    // Find the simple rule that explains every color seen (needs a few examples).
+    const seen = hubTable.rows.filter((r) => r.clientID && known[r.clientID]);
+    if (seen.length >= 4 && !avatarRule) {
+      for (const by of ['clientID', 'id']) for (let mod = 6; mod <= 16; mod++) for (const add of [0, 1]) {
+        if (seen.every((r) => (+r[by] % mod) + add === known[r.clientID])) { avatarRule = { by, mod, add }; return; }
+      }
+    }
+  }
+  function avatarColor(r) {
+    const known = store.get(AVATAR_KEY, null) || {};
+    if (r.clientID && known[r.clientID]) return known[r.clientID];
+    if (avatarRule) return (+r[avatarRule.by] % avatarRule.mod) + avatarRule.add;
+    let h = 0;
+    for (const ch of String(r.clientName || r.id)) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
+    return (h % 12) + 1;
+  }
+  function avatarFor(r) {
+    const el = document.createElement('span');
+    el.className = 'pd9-av';
+    el.setAttribute('aria-hidden', 'true');
+    if (r.picture) {
+      const img = document.createElement('img');
+      img.src = r.picture;
+      img.alt = '';
+      img.loading = 'lazy';
+      el.appendChild(img);
+      return el;
+    }
+    const words = String(r.clientName || '').trim().split(/\s+/).filter(Boolean);
+    el.textContent = ((words[0] || '?')[0] + (words.length > 1 ? words[words.length - 1][0] : '')).toUpperCase();
+    el.style.setProperty('--pd9-av', `var(--t-color-object-${avatarColor(r)}-primary, #1f7a77)`);
+    return el;
+  }
+
   // A tag chip, tinted with the color Filevine gives that tag.
   function tagChip(tag) {
     const chip = document.createElement('button');
@@ -2685,14 +2859,20 @@
     const on = tagFilter().tags.includes(chip.dataset.tag);
     chip.classList.toggle('pd9-tag-on', on);
     chip.setAttribute('aria-pressed', String(on));
-    chip.title = on ? `Stop filtering by ${tag.name}` : `Show only cases tagged ${tag.name}`;
-    chip.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); toggleTagFilter(chip.dataset.tag); });
+    const alt = /Mac/i.test(navigator.platform) ? 'Option' : 'Alt';
+    chip.title = on ? `Stop filtering by ${tag.name}` : `Click: only cases tagged ${tag.name}\n${alt}+click: hide cases tagged ${tag.name}`;
+    chip.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      if (e.altKey) toggleTagExclude(chip.dataset.tag); else toggleTagFilter(chip.dataset.tag);
+    });
     return chip;
   }
 
   // ---------- tag filter for the PD9 table (saved) ----------
   const TAG_FILTER_KEY = 'pd9-hub-own-tagfilter';
-  const tagFilter = () => { const f = store.get(TAG_FILTER_KEY, null) || {}; return { tags: f.tags || [], mode: f.mode === 'any' ? 'any' : 'all' }; };
+  // tags: must have (All or Any of them). not: must NOT have any of these.
+  const tagFilter = () => { const f = store.get(TAG_FILTER_KEY, null) || {}; return { tags: f.tags || [], not: f.not || [], mode: f.mode === 'any' ? 'any' : 'all' }; };
   function setTagFilter(f) {
     store.set(TAG_FILTER_KEY, f);
     const ov = document.getElementById('pd9-hub-sorted');
@@ -2700,13 +2880,22 @@
   }
   function toggleTagFilter(tag) {
     const f = tagFilter();
+    f.not = f.not.filter((t) => t !== tag);
     f.tags = f.tags.includes(tag) ? f.tags.filter((t) => t !== tag) : [...f.tags, tag];
+    setTagFilter(f);
+  }
+  function toggleTagExclude(tag) {
+    const f = tagFilter();
+    f.tags = f.tags.filter((t) => t !== tag);
+    f.not = f.not.includes(tag) ? f.not.filter((t) => t !== tag) : [...f.not, tag];
     setTagFilter(f);
   }
   function passesTagFilter(r) {
     const f = tagFilter();
-    if (!f.tags.length) return true;
+    if (!f.tags.length && !f.not.length) return true;
     const mine = r.tags.map((t) => t.name.toLowerCase());
+    if (f.not.some((t) => mine.includes(t))) return false; // has a tag you excluded
+    if (!f.tags.length) return true;
     return f.mode === 'any' ? f.tags.some((t) => mine.includes(t)) : f.tags.every((t) => mine.includes(t));
   }
 
@@ -2758,7 +2947,16 @@
         const n = document.createElement('span');
         n.className = 'pd9-tm-count';
         n.textContent = counts.get(k);
-        row.append(cb, chip, n);
+        const excluded = cur.not.includes(k);
+        if (excluded) { row.classList.add('pd9-tm-not'); chip.classList.add('pd9-tag-not'); }
+        const notBtn = document.createElement('button');
+        notBtn.type = 'button';
+        notBtn.className = 'pd9-tm-notbtn';
+        notBtn.textContent = 'Not';
+        notBtn.setAttribute('aria-pressed', String(excluded));
+        notBtn.title = excluded ? `Stop hiding cases tagged ${c.name}` : `Hide cases tagged ${c.name}`;
+        notBtn.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); toggleTagExclude(k); drawList(); });
+        row.append(cb, chip, n, notBtn);
         list.appendChild(row);
       }
       if (!list.children.length) list.innerHTML = '<p class="pd9-tm-empty">No tags match.</p>';
@@ -2768,7 +2966,7 @@
       setTagFilter({ ...tagFilter(), mode: b.dataset.mode });
       menu.querySelectorAll('.pd9-tm-mode button').forEach((x) => x.setAttribute('aria-checked', String(x === b)));
     }));
-    menu.querySelector('.pd9-tm-clear').addEventListener('click', () => { setTagFilter({ ...tagFilter(), tags: [] }); drawList(); });
+    menu.querySelector('.pd9-tm-clear').addEventListener('click', () => { setTagFilter({ ...tagFilter(), tags: [], not: [] }); drawList(); });
     drawList();
     const r = anchor.getBoundingClientRect();
     const o = ov.getBoundingClientRect();
@@ -2799,6 +2997,8 @@
         // skips reloading all of Filevine. Ctrl+click still opens a fresh tab.
         a.target = CASE_TAB;
         // Middle click opens a new tab the browser's normal way (the link's address).
+        a.addEventListener('mouseenter', () => { if (windowMode()) prefetchCase(r.id); });
+        a.addEventListener('mouseleave', () => clearTimeout(prefetchTimer));
         a.addEventListener('click', (ev) => {
           if (ev.button !== 0) return;
           if (ev.ctrlKey || ev.metaKey || ev.shiftKey) { ev.preventDefault(); window.open(a.href, '_blank', 'noopener'); return; } // a fresh tab
@@ -2809,10 +3009,18 @@
         td.appendChild(a);
         break;
       }
-      case 'defendant':
-        td.textContent = r.defendant || r.clientName || '';
+      case 'defendant': {
+        const wrap = document.createElement('span');
+        wrap.className = 'pd9-who';
+        wrap.appendChild(avatarFor(r));
+        const nm = document.createElement('span');
+        nm.className = 'pd9-who-name';
+        nm.textContent = r.defendant || r.clientName || '';
+        wrap.appendChild(nm);
+        td.appendChild(wrap);
         if (!r.defendant) td.classList.add('pd9-own-pending');
         break;
+      }
       case 'lastActivity': td.textContent = r.lastActivity ? niceDate(r.lastActivity) : ''; break;
       case 'next': {
         if (!hubEvents) { td.innerHTML = '<span class="pd9-skel-line"></span>'; break; }
@@ -2842,6 +3050,7 @@
 
   function drawOwnTable(ov) {
     if (!hubTable || !hubTable.rows) return;
+    learnAvatarColors();
     const layout = ownLayout();
     const cols = layout.order.map((k) => OWN_COLS.find((c) => c.key === k));
     const sort = store.get(HUB_SORT_KEY, null) || { col: 'next', dir: 'asc' };
@@ -2899,7 +3108,7 @@
       });
       th.appendChild(b);
       if (c.key === 'tags') {
-        const active = tagFilter().tags.length;
+        const active = tagFilter().tags.length + tagFilter().not.length;
         const fb = document.createElement('button');
         fb.type = 'button';
         fb.className = 'pd9-tag-funnel' + (active ? ' pd9-funnel-on' : '');
@@ -2992,7 +3201,7 @@
     const soon = rows.filter((r) => { const e = nextOf(r); return e && e.when - Date.now() < 3 * 864e5; }).length;
     const tf = tagFilter();
     const status = ov.querySelector('.pd9-hs-status');
-    status.textContent = (tf.tags.length ? `${rows.length} of ${hubTable.rows.length} projects` : `${rows.length} projects`) + (soon ? `, ${soon} with an event in the next 3 days` : '');
+    status.textContent = (tf.tags.length || tf.not.length ? `${rows.length} of ${hubTable.rows.length} projects` : `${rows.length} projects`) + (soon ? `, ${soon} with an event in the next 3 days` : '');
     let act = ov.querySelector('.pd9-bulk-bar');
     if (!act) { act = document.createElement('span'); act.className = 'pd9-bulk-bar'; ov.querySelector('.pd9-hs-bar').appendChild(act); }
     act.textContent = '';
@@ -3011,26 +3220,31 @@
     let chips = ov.querySelector('.pd9-hs-filters');
     if (!chips) { chips = document.createElement('span'); chips.className = 'pd9-hs-filters'; status.after(chips); }
     chips.textContent = '';
-    if (tf.tags.length) {
+    const shownName = (t) => (hubTable.rows.flatMap((r) => r.tags).find((g) => g.name.toLowerCase() === t) || { name: t }).name;
+    const addGroup = (label, list, cls, remove) => {
+      if (!list.length) return;
       const lead = document.createElement('span');
       lead.className = 'pd9-hs-lead';
-      lead.textContent = tf.tags.length > 1 ? `Tagged (${tf.mode === 'all' ? 'all' : 'any'} of):` : 'Tagged:';
+      lead.textContent = label;
       chips.appendChild(lead);
-      for (const t of tf.tags) {
+      for (const t of list) {
         const x = document.createElement('button');
         x.type = 'button';
-        x.className = 'pd9-hs-chip';
-        const shown = (hubTable.rows.flatMap((r) => r.tags).find((g) => g.name.toLowerCase() === t) || { name: t }).name;
-        x.textContent = shown.replace(/^#/, '');
-        x.title = `Remove ${shown}`;
-        x.addEventListener('click', () => toggleTagFilter(t));
+        x.className = `pd9-hs-chip ${cls}`;
+        x.textContent = shownName(t).replace(/^#/, '');
+        x.title = `Remove ${shownName(t)}`;
+        x.addEventListener('click', () => remove(t));
         chips.appendChild(x);
       }
+    };
+    addGroup(tf.tags.length > 1 ? `Tagged (${tf.mode === 'all' ? 'all' : 'any'} of):` : 'Tagged:', tf.tags, '', toggleTagFilter);
+    addGroup('Not tagged:', tf.not, 'pd9-hs-chip-not', toggleTagExclude);
+    if (tf.tags.length || tf.not.length) {
       const clr = document.createElement('button');
       clr.type = 'button';
       clr.className = 'pd9-hs-clear';
       clr.textContent = 'Clear';
-      clr.addEventListener('click', () => setTagFilter({ ...tf, tags: [] }));
+      clr.addEventListener('click', () => setTagFilter({ ...tf, tags: [], not: [] }));
       chips.appendChild(clr);
     }
     const bar = ov.querySelector('.pd9-hs-progress');
@@ -3110,7 +3324,11 @@
       const wb = w.querySelector('input');
       wb.checked = windowMode();
       wb.setAttribute('aria-checked', String(wb.checked));
-      wb.addEventListener('change', (e) => { store.set(WIN_MODE_KEY, e.target.checked); e.target.setAttribute('aria-checked', String(e.target.checked)); });
+      wb.addEventListener('change', (e) => {
+        store.set(WIN_MODE_KEY, e.target.checked);
+        e.target.setAttribute('aria-checked', String(e.target.checked));
+        if (e.target.checked) makeSpare(); else document.querySelectorAll('.pd9-win-spare').forEach((x) => x.remove());
+      });
       toggle.after(w);
     }
     if (!useOwn) { if (ov) ov.remove(); return; }
@@ -3224,7 +3442,7 @@
     saveWindows();
   }
   function minimizeWindow(w) { w.classList.add('pd9-win-min'); w.classList.remove('pd9-win-focus'); drawTaskbar(); saveWindows(); }
-  function closeWindow(w) { w.remove(); drawTaskbar(); saveWindows(); }
+  function closeWindow(w) { recycleWindow(w); drawTaskbar(); saveWindows(); }
   function toggleMax(w) { w.classList.toggle('pd9-win-max'); placeWin(w); saveWindows(); }
 
   function placeWin(w) {
@@ -3246,18 +3464,56 @@
   // A spare window that has already loaded Filevine, kept out of sight. Opening a
   // case uses it and just switches it to that case, which is much faster than
   // starting Filevine from scratch. A new spare warms up in the background.
+  // Keep a couple of spares ready, warming one at a time so they don't slow each other down.
+  const SPARE_POOL = 2;
   function makeSpare() {
-    if (IN_FRAME || !windowMode() || document.querySelector('.pd9-win-spare')) return;
+    if (IN_FRAME || !windowMode()) return;
+    const spares = document.querySelectorAll('.pd9-win-spare');
+    if (spares.length >= SPARE_POOL || [...spares].some((x) => x.dataset.warm !== '1')) return; // full, or one still warming
     const w = openCaseWindow('', 'Spare', null, true);
     const frame = w.querySelector('iframe');
-    frame.addEventListener('load', () => setTimeout(() => { w.dataset.warm = '1'; }, 1500), { once: true });
+    frame.addEventListener('load', () => setTimeout(() => { w.dataset.warm = '1'; makeSpare(); }, 1500), { once: true });
+  }
+
+  // Closing a window keeps its Filevine running as a spare (if there's room),
+  // so the next case opens instantly instead of loading Filevine again.
+  function recycleWindow(w) {
+    if (!windowMode() || document.querySelectorAll('.pd9-win-spare').length >= SPARE_POOL) { w.remove(); return; }
+    const f = w.querySelector('iframe');
+    w.className = 'pd9-win pd9-win-spare';
+    w.setAttribute('aria-hidden', 'true');
+    w.style.zIndex = '';
+    delete w.dataset.prefetch;
+    delete w.dataset.key;
+    delete w.dataset.href;
+    delete w.dataset.auto;
+    w.dataset.pid = '';
+    w.dataset.warm = '1';
+    try { f.contentWindow.location.hash = '#/'; } catch (e) { w.remove(); }
+  }
+
+  // Hovering a case link in Window mode starts loading that case in a spare,
+  // so by the time you click, it's often already there.
+  let prefetchTimer = null;
+  function prefetchCase(id) {
+    clearTimeout(prefetchTimer);
+    prefetchTimer = setTimeout(() => {
+      if (!windowMode() || document.querySelector(`.pd9-win:not(.pd9-win-spare)[data-pid="${CSS.escape(String(id))}"]`)) return;
+      if (document.querySelector(`.pd9-win-spare[data-prefetch="${CSS.escape(String(id))}"]`)) return;
+      const spare = document.querySelector('.pd9-win-spare[data-warm="1"]:not([data-prefetch])') || document.querySelector('.pd9-win-spare[data-warm="1"]');
+      if (!spare) return;
+      spare.dataset.prefetch = String(id);
+      try { spare.querySelector('iframe').contentWindow.location.hash = `#/project/${encodeURIComponent(id)}/activity`; } catch (e) { /* ignore */ }
+    }, 120);
   }
   setInterval(() => { if (!IN_FRAME && windowMode()) makeSpare(); }, 15000);
+  setTimeout(() => { if (!IN_FRAME && windowMode()) makeSpare(); }, 2500); // start warming soon after the page loads
 
   function openCaseWindow(id, title, restore, spare = false) {
     const existing = document.querySelector(`.pd9-win:not(.pd9-win-spare)[data-pid="${CSS.escape(String(id))}"]`);
     if (existing && !restore) { existing.classList.remove('pd9-win-min'); focusWindow(existing); return existing; }
-    const warm = !restore && !spare && document.querySelector('.pd9-win-spare[data-warm="1"]');
+    const warm = !restore && !spare && (document.querySelector(`.pd9-win-spare[data-prefetch="${CSS.escape(String(id))}"]`)
+      || document.querySelector('.pd9-win-spare[data-warm="1"]:not([data-prefetch])') || document.querySelector('.pd9-win-spare[data-warm="1"]'));
     if (warm) {
       const n0 = document.querySelectorAll('.pd9-win:not(.pd9-win-spare)').length;
       warm.classList.remove('pd9-win-spare');
@@ -3268,7 +3524,11 @@
       warm.querySelector('.pd9-win-title').textContent = warm.dataset.title;
       const f = warm.querySelector('iframe');
       f.title = warm.dataset.title;
-      try { f.contentWindow.location.hash = `#/project/${encodeURIComponent(id)}/activity`; } catch (e) { f.src = `${location.origin}${location.pathname}#/project/${encodeURIComponent(id)}/activity`; }
+      const already = warm.dataset.prefetch === String(id);
+      delete warm.dataset.prefetch;
+      if (!already) {
+        try { f.contentWindow.location.hash = `#/project/${encodeURIComponent(id)}/activity`; } catch (e) { f.src = `${location.origin}${location.pathname}#/project/${encodeURIComponent(id)}/activity`; }
+      }
       warm.dataset.box = JSON.stringify({ left: 80 + (n0 % 8) * 32, top: 70 + (n0 % 8) * 32, width: Math.min(1100, window.innerWidth - 160), height: Math.min(760, window.innerHeight - 140) });
       placeWin(warm);
       focusWindow(warm);
@@ -3299,6 +3559,7 @@
       <span class="pd9-win-grip" aria-hidden="true"></span>`;
     w.querySelector('.pd9-win-title').textContent = w.dataset.title;
     const frame = w.querySelector('iframe');
+    frame.name = 'pd9-case-window'; // so the script knows to run inside it
     frame.title = w.dataset.title;
     frame.src = spare ? `${location.origin}${location.pathname}#/` : (restore && restore.href) || `${location.origin}${location.pathname}#/project/${encodeURIComponent(id)}/activity`;
     if (spare) { w.classList.add('pd9-win-spare'); w.setAttribute('aria-hidden', 'true'); }
@@ -4023,20 +4284,41 @@
     host.after(btn);
   }
 
-  // ---------- Esc closes the note/task box ----------
-  // Runs after Filevine's own Esc handling, so an open tag list or date picker
-  // closes first; the next Esc closes the box. Your text is kept as a draft,
-  // so "Restore note" brings it back.
+  // ---------- Esc: snap back, then minimize, then close the note/task box ----------
+  // If you moved or resized the box, the first Esc puts it back in Filevine's
+  // normal spot. The next Esc minimizes it (your text stays in it). Esc again,
+  // while it's minimized, closes it (the text is kept as a draft, so "Restore
+  // note" brings it back). Runs after Filevine's own Esc handling, so an open
+  // tag list or date picker closes first.
+  const MIN_BTN = '[data-testid="activity-creator-minimize-button"]';
   document.addEventListener('keydown', (e) => {
     if (e.key !== 'Escape' || e.defaultPrevented || e.isComposing) return;
     if (document.querySelector('.pd9-overlay, #pd9-switch')) return; // one of our windows is open: it handles Esc
     const active = document.activeElement;
     let form = composerOf(active);
     if (!form) {
-      // Focus isn't in a box: close the floating one if it's open and nothing else is.
+      // Focus isn't in a box: act on the floating one, if it's showing (open or minimized).
       const docked = $(SEL.docked);
-      if (!docked || !isVisible($(SEL.message, docked)) || isTyping(e)) return;
+      if (!docked || !isVisible(docked) || isTyping(e)) return;
       form = docked;
+    }
+    const open = isVisible($(SEL.message, form));
+    // 1) Moved or resized? Snap it back to Filevine's normal spot first.
+    if (open && form.classList.contains('pd9-placed')) {
+      e.preventDefault();
+      setComposerBox(null);
+      refreshComposer(form);
+      return;
+    }
+    // 2) Then minimize, 3) then close.
+    const minimize = $(MIN_BTN, form);
+    if (open && minimize && isVisible(minimize)) {
+      e.preventDefault();
+      saveDraft(form);
+      minimize.click();
+      refreshComposer(form);
+      if (active && form.contains(active)) active.blur(); // so the next Esc isn't typed into a hidden box
+      return;
     }
     const close = $(SEL.closeBtn, form);
     if (!close) return;
@@ -4409,6 +4691,8 @@
     }
     #pd9-case .pd9-primary { background: #1f2933; border-color: #1f2933; color: #fff; }
     #pd9-case { width: 380px; max-height: calc(100vh - 90px); overflow: auto; }
+    #pd9-case .pd9-case-mine { margin: 6px 0 2px; font-size: 11.5px; font-weight: 600; color: #667085; }
+    #pd9-case .pd9-hit-mine .pd9-case-title { font-weight: 700; }
     #pd9-case .pd9-case-results:empty { display: none; }
     #pd9-case .pd9-case-results { margin-top: 12px; border-top: 1px solid var(--t-color-border, #dfe3e8); padding-top: 10px; }
     #pd9-case .pd9-case-status { display: flex; align-items: center; gap: 8px; font-weight: 600; margin-bottom: 6px; }
@@ -4498,7 +4782,16 @@
     .pd9-charges-modal .pd9-charges-case { margin: 0; font-size: 13px; opacity: .75; }
     .pd9-charges-modal .pd9-charges-list { margin: 0; padding-left: 22px; display: flex; flex-direction: column; gap: 6px; font-size: 14px; user-select: text; }
     /* Movable, resizable note/task box */
-    .pd9-movable { resize: both; overflow: auto; box-sizing: border-box; min-width: 380px; }
+    .pd9-movable { box-sizing: border-box; min-width: 380px; }
+    .pd9-movable.pd9-placed {
+      left: var(--pd9-cl) !important; top: var(--pd9-ct) !important; right: auto !important; bottom: auto !important;
+      width: var(--pd9-cw) !important; height: var(--pd9-ch) !important; max-height: none !important; overflow: auto;
+    }
+    .pd9-composer-grip { display: none; }
+    .pd9-movable > .pd9-composer-grip {
+      display: block; position: absolute; right: 0; bottom: 0; width: 16px; height: 16px; z-index: 2; cursor: nwse-resize;
+      background: linear-gradient(135deg, transparent 50%, #c9ced6 50%, #c9ced6 58%, transparent 58%, transparent 70%, #c9ced6 70%, #c9ced6 78%, transparent 78%);
+    }
     .pd9-movable .header { cursor: move; touch-action: none; }
     .pd9-movable .header button, .pd9-movable .header [role="button"] { cursor: pointer; }
     .pd9-movable .note-input-wrapper { max-height: none !important; }
@@ -4602,6 +4895,21 @@
     #pd9-hub-sorted .pd9-tm-empty { margin: 10px; color: var(--slate); }
     #pd9-hub-sorted .pd9-tm-foot { display: flex; justify-content: flex-end; padding: 6px 8px; border-top: 1px solid var(--line); }
     #pd9-hub-sorted .pd9-tm-clear { border: 0; background: none; color: var(--accent); font: inherit; font-size: 12px; font-weight: 600; cursor: pointer; }
+    #pd9-hub-sorted .pd9-tm-notbtn { border: 1px solid #d0d5dd; background: #fff; color: #667085; border-radius: 6px; padding: 1px 7px; font: inherit; font-size: 11px; font-weight: 700; cursor: pointer; }
+    #pd9-hub-sorted .pd9-tm-notbtn:hover { border-color: #b42318; color: #b42318; }
+    #pd9-hub-sorted .pd9-tm-notbtn[aria-pressed="true"] { background: #b42318; border-color: #b42318; color: #fff; }
+    #pd9-hub-sorted .pd9-tm-notbtn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+    #pd9-hub-sorted .pd9-tag-not { text-decoration: line-through; opacity: .7; }
+    #pd9-hub-sorted .pd9-tm-count { margin-left: auto; }
+    #pd9-hub-sorted .pd9-hs-chip-not { background: #fee4e2; color: #b42318; text-decoration: line-through; text-decoration-thickness: 1px; }
+    #pd9-hub-sorted .pd9-who { display: inline-flex; align-items: center; gap: 10px; max-width: 100%; vertical-align: middle; }
+    #pd9-hub-sorted .pd9-who-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    #pd9-hub-sorted .pd9-av {
+      flex: none; display: grid; place-items: center; width: 28px; height: 28px; border-radius: 50%; overflow: hidden;
+      background: var(--pd9-av, #1f7a77); color: var(--t-color-object-text-light, #fff); font-size: 11px; font-weight: 700; letter-spacing: .02em;
+    }
+    #pd9-hub-sorted .pd9-av img { width: 100%; height: 100%; object-fit: cover; }
+    #pd9-hub-sorted .pd9-own-pending .pd9-av { opacity: 1; }
     @media (prefers-reduced-motion: reduce) { #pd9-hub-sorted *, #pd9-hub-sorted .pd9-skel-line { transition: none !important; animation: none !important; } }
     .pd9-hub-toggle-plain { display: inline-flex; align-items: center; gap: 6px; margin: 0 0 8px; font-size: 13px; font-weight: 600; cursor: pointer; user-select: none; }
     .pd9-hub-toggle-plain input { width: 16px; height: 16px; margin: 0; }
@@ -4753,6 +5061,7 @@
       -webkit-line-clamp: none !important; line-clamp: none !important;
       max-height: none !important; overflow: visible !important; display: block !important;
     }
+    .pd9-ver { margin-left: 4px; font-size: .85em; font-weight: 400; opacity: .5; }
     .fvqn-toast {
       position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
       background: #1f2933; color: #fff; padding: 8px 14px; border-radius: 6px;
