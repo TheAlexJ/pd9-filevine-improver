@@ -1,11 +1,12 @@
 // ==UserScript==
 // @name         PD9 Filevine Improver
 // @namespace    https://filevine.local/pd9-improver
-// @version      3.95.0
+// @version      3.100.3
 // @description  Faster notes, tasks, and case closing in Filevine for PD9.
 // @match        https://*.filevine.com/*
 // @match        https://*.filevineapp.com/*
 // @match        https://*.filevinegov.com/*
+// @match        https://courts.osceolaclerk.com/BenchmarkWeb/*
 // @homepageURL  https://github.com/TheAlexJ/pd9-filevine-improver
 // @supportURL   https://github.com/TheAlexJ/pd9-filevine-improver/issues
 // @updateURL    https://raw.githubusercontent.com/TheAlexJ/pd9-filevine-improver/main/pd9-filevine-improver.user.js
@@ -13,6 +14,7 @@
 // @run-at       document-idle
 // @grant        GM_getValue
 // @grant        GM_setValue
+// @grant        unsafeWindow
 // ==/UserScript==
 
 (function () {
@@ -20,10 +22,146 @@
 
   // Inside a case window (Window mode), Filevine runs in a frame. There we keep the
   // note and task tools but skip the page-level extras (search windows, hub table).
+  // Which build this is. The same code makes two scripts:
+  //   'attorney' = PD9 Filevine Improver (Project Hub table, Window mode, case switcher)
+  //   'staff'    = PD9 Filevine Staff (no Project Hub extras or case switcher; adds task triage)
+  const EDITION = 'attorney';
+  const STAFF = EDITION === 'staff';
   const IN_FRAME = (() => { try { return window.top !== window.self; } catch (e) { return true; } })();
   // Only run in frames the script made itself (case windows, ready windows, and the
   // multi-case worker). Filevine's own hidden frames don't need it, so stop there.
   if (IN_FRAME && !/^pd9-/.test(window.name || '')) return;
+
+  // ---------- Osceola Clerk (Benchmark): run a case number search ----------
+  // The "Benchmark" button on an Osceola case opens the Clerk's search page with
+  // the case number in the link (#pd9case=2026 CF 003344). Here, on the Clerk's
+  // site, the script picks "Case Number", types it in and presses Search, the
+  // same as a person would. It never fills in a captcha. If one shows, you finish it.
+  const BENCHMARK_PENDING = 'pd9-benchmark-pending';
+  if (location.hostname === 'courts.osceolaclerk.com') {
+    // A page with the search box is the search page, even when its address is the
+    // search's own address (the Clerk's site shows the form again when it refuses).
+    const onSearchPage = !!(document.getElementById('caseNumber') && document.getElementById('searchButton'));
+    const fromHash = decodeURIComponent((location.hash.match(/pd9case=([^&]+)/) || [])[1] || '');
+    const getPending = () => { try { return GM_getValue(BENCHMARK_PENDING, null); } catch (e) { return null; } };
+    const setPending = (v) => { try { GM_setValue(BENCHMARK_PENDING, v); } catch (e) { /* storage is optional */ } };
+    if (fromHash) setPending({ caseNo: fromHash, at: Date.now(), tries: 0 });
+    let pending = getPending();
+    if (pending && Date.now() - pending.at > 10 * 60000) { setPending(null); pending = null; }
+    // Logged in pages have a Logout button at the top right.
+    const loggedIn = !!document.getElementById('btnLogout')
+      || [...document.querySelectorAll('a, button')].some((el) => el.offsetParent && !el.closest('.modal, [id^="sessionTimeout"]') && /^\s*log\s*out\s*$/i.test(el.textContent || ''));
+    if (!onSearchPage) {
+      if (!pending) return;
+      // Just logged in and landed somewhere else: go back to the search page to finish.
+      if (pending.needLogin && loggedIn) {
+        setPending({ ...pending, needLogin: false, at: Date.now() });
+        location.href = `${location.origin}/BenchmarkWeb/Home.aspx/Search`;
+        return;
+      }
+      // Results or a case page means the search went through.
+      if (pending.tries) setPending(null);
+      return;
+    }
+    if (!pending) return;
+    const caseNo = pending.caseNo;
+    const pageWin = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
+    const note = (text, stay) => {
+      let n = document.getElementById('pd9-bm-note');
+      if (!n) {
+        n = document.createElement('div');
+        n.id = 'pd9-bm-note';
+        n.style.cssText = 'position:fixed;right:16px;bottom:16px;z-index:99999;max-width:340px;padding:10px 14px;border-radius:10px;background:#14171c;color:#e6e9ee;font:13px/1.4 system-ui,Segoe UI,sans-serif;box-shadow:0 10px 30px rgba(0,0,0,.35)';
+        document.body.appendChild(n);
+      }
+      n.textContent = text;
+      clearTimeout(n._t);
+      if (!stay) n._t = setTimeout(() => n.remove(), 8000);
+    };
+    const fire = (el, type) => el.dispatchEvent(new Event(type, { bubbles: true }));
+    const captchaShowing = () => [...document.querySelectorAll('.g-recaptcha, #WebCaptcha, iframe[src*="recaptcha"][title*="challenge" i]')]
+      .some((el) => { const r = el.getBoundingClientRect(); return r.width > 30 && r.height > 30 && getComputedStyle(el).visibility !== 'hidden'; });
+    const fill = () => {
+      const radio = document.getElementById('radio_2');
+      const box = document.getElementById('caseNumber');
+      if (!radio || !box) return false;
+      if (!radio.checked) radio.click();
+      box.style.display = 'inline-block';
+      box.focus();
+      box.value = caseNo;
+      ['input', 'change'].forEach((t) => fire(box, t));
+      // The Clerk's page copies these two into its form when you press Search.
+      // Fill them too, in case its own code skips it.
+      const form = document.querySelector('form.searchform');
+      if (form) {
+        const t = form.querySelector('input[name="type"]');
+        const q = form.querySelector('input[name="search"]');
+        if (t) t.value = radio.getAttribute('searchtype') || 'CaseNumber';
+        if (q) q.value = caseNo;
+      }
+      return true;
+    };
+    // Wait for the whole page, including the Clerk's own search code and its
+    // invisible captcha check. Pressing Search before that is ready makes the
+    // Clerk's site throw the search away and show a blank search page.
+    const ready = () => new Promise((resolve) => {
+      const started = Date.now();
+      const check = () => {
+        const loaded = document.readyState === 'complete';
+        const rc = pageWin.grecaptcha;
+        const rcReady = !!(rc && (typeof rc.execute === 'function' || typeof rc.render === 'function'));
+        const hasRc = !!document.querySelector('script[src*="recaptcha"], iframe[src*="recaptcha"]');
+        if (loaded && (rcReady || !hasRc || Date.now() - started > 8000)) resolve();
+        else setTimeout(check, 200);
+      };
+      check();
+    });
+    const go = async () => {
+      if (fromHash) history.replaceState(null, '', location.pathname + location.search);
+      // Not logged in: searching now would fail or ask for a captcha. Ask to log in;
+      // the search runs by itself when you come back logged in (within 10 minutes).
+      if (!loggedIn) {
+        setPending({ ...pending, needLogin: true, at: Date.now() });
+        const login = [...document.querySelectorAll('a, button')].find((el) => /^\s*(log\s*in|sign\s*in)\b/i.test(el.textContent || '') && el.offsetParent);
+        note(`You are not logged in to Benchmark. Log in, and the search for ${caseNo} runs by itself after.`, true);
+        const n = document.getElementById('pd9-bm-note');
+        if (n && login) {
+          const b = document.createElement('button');
+          b.type = 'button';
+          b.textContent = 'Log in';
+          b.style.cssText = 'display:block;margin-top:8px;padding:6px 14px;border-radius:7px;border:0;background:#2fbfae;color:#06201d;font-weight:600;cursor:pointer';
+          b.addEventListener('click', () => login.click());
+          n.appendChild(b);
+        }
+        if (login) { login.style.outline = '3px solid #2fbfae'; login.style.outlineOffset = '2px'; }
+        return;
+      }
+      // Any message the Clerk's site showed about the last try.
+      const why = [...document.querySelectorAll('.toast-message, .alert-error, .alert-danger, .alert, .validation-summary-errors, .field-validation-error, .error')]
+        .map((e) => e.textContent.trim()).filter((t) => t && t.length < 300)[0] || '';
+      // Second time back on a blank search page: stop trying, leave it filled in.
+      if (pending.tries >= 2) {
+        setPending(null);
+        let n = 0;
+        const waitFill = () => { if (!fill() && (n += 1) < 40) setTimeout(waitFill, 250); };
+        waitFill();
+        note(`The Clerk's site would not take the automatic search${why ? ` (it said: "${why}")` : ''}. ${caseNo} is filled in. Click Search.`, true);
+        return;
+      }
+      note(`Getting ready to search for ${caseNo}...`, true);
+      await ready();
+      await new Promise((r) => setTimeout(r, 1200 + pending.tries * 2000));
+      if (!fill()) { note(`Could not find the case number box. Search for ${caseNo} by hand.`, true); setPending(null); return; }
+      if (captchaShowing()) { setPending(null); note(`${caseNo} is filled in. Finish the captcha, then click Search.`, true); return; }
+      setPending({ ...pending, tries: pending.tries + 1, at: Date.now() });
+      const btn = document.getElementById('searchButton');
+      if (!btn) { note(`${caseNo} is filled in. Click Search.`, true); setPending(null); return; }
+      btn.click();
+      note(`Searching for ${caseNo}...`);
+    };
+    go();
+    return;
+  }
 
 
 
@@ -129,7 +267,7 @@
   const TASK_DUE_IN_DAYS = 1;    // Default task due date: 1 = tomorrow. Replaces Filevine's "today". null = off.
 
   // Case links in the Project Hub open to this section. Set to null to turn off.
-  const HUB_OPENS_TO = 'activity';
+  const HUB_OPENS_TO = STAFF ? '' : 'activity'; // staff: leave Project Hub links alone
 
 
   // ---------------------------------------------------------------
@@ -741,6 +879,28 @@
       openOptions();
     }, true);
     item.after(mine);
+
+    // "Dark mode: Off/On", right under Improver Options. Clicking it keeps the menu open.
+    const dark = item.cloneNode(true);
+    dark.setAttribute('data-pd9-dark', '');
+    for (const el of [dark, ...dark.querySelectorAll('*')]) {
+      el.removeAttribute('id');
+      el.removeAttribute('href');
+      el.removeAttribute('data-testid');
+      if (el.childElementCount === 0 && el.textContent.trim() === 'Filevine Settings') {
+        el.textContent = 'Dark mode: ';
+        const st = document.createElement('span');
+        st.className = 'pd9-dark-state';
+        st.textContent = darkOn() ? 'On' : 'Off';
+        el.appendChild(st);
+      }
+    }
+    // Swap the copied icon for a moon.
+    const ic = dark.querySelector('i.mdis, i[data-testid="material-icon"], i');
+    if (ic) { const t = [...ic.childNodes].find((n) => n.nodeType === 3 && n.nodeValue.trim()); if (t) t.nodeValue = 'dark_mode '; const h = ic.querySelector('.visually-hidden'); if (h) h.textContent = 'slot-text:dark_mode'; }
+    dark.title = 'Alt+Shift+D';
+    dark.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); toggleDark(); }, true);
+    mine.after(dark);
   }
 
   const escapeAttr = (t) => String(t).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;');
@@ -2438,6 +2598,95 @@
   }
 
 
+  // The Court Case Number on the Case Summary tab, in the Clerk's format:
+  // "2026-CF-003344-A-OS" -> "2026 CF 003344". Also reads a full UCN like
+  // "492026CF003344AXXXOS" (49 = Osceola). Returns '' for non-Osceola numbers.
+  function benchmarkCaseNumber(raw) {
+    let t = String(raw || '').replace(/[^0-9A-Za-z]/g, '').toUpperCase();
+    if (!t) return '';
+    if (/^\d{6}[A-Z]{2}/.test(t)) { // UCN: county code first
+      if (!t.startsWith('49')) return '';
+      t = t.slice(2);
+    } else if (/(OR|OC)$/.test(t) && !/OS$/.test(t)) {
+      return ''; // Orange County
+    } else if (!/OS$/.test(t)) {
+      // No county on the number: go by the case title instead.
+      const title = currentCaseName();
+      if (!/OS$/i.test(title.slice(title.indexOf('|') + 1).replace(/[^0-9A-Za-z]/g, ''))) return '';
+    }
+    const m = t.match(/^(\d{4}|\d{2})([A-Z]{2})(\d{1,6})/);
+    if (!m) return '';
+    let year = m[1];
+    if (year.length === 2) {
+      const yy = Number(year);
+      year = String(yy <= (new Date().getFullYear() % 100) + 1 ? 2000 + yy : 1900 + yy);
+    }
+    return `${year} ${m[2]} ${m[3].padStart(6, '0')}`;
+  }
+
+  // Court Case Number for each case, read from Case Summary (the same request the tab makes).
+  const courtNoCache = new Map(); // project id -> { at, value } or a pending promise
+  function courtCaseNumber(pid, fresh) {
+    const hit = courtNoCache.get(pid);
+    if (hit && !fresh) return hit instanceof Promise ? hit : Promise.resolve(hit.value);
+    const p = loadCaseSummary(pid)
+      .then((obj) => String(pickField(obj, 'courtcasenumber') || '').trim())
+      .catch(() => (hit && !(hit instanceof Promise) ? hit.value : ''))
+      .then((value) => { courtNoCache.set(pid, { at: Date.now(), value }); return value; });
+    courtNoCache.set(pid, p);
+    return p;
+  }
+  const benchmarkUrl = (caseNo) => `https://courts.osceolaclerk.com/BenchmarkWeb/Home.aspx/Search#pd9case=${encodeURIComponent(caseNo)}`;
+
+  let benchKey = '';
+  function addBenchmarkButton() {
+    const pid = inCase() ? projectId() : null;
+    const hit = pid && courtNoCache.get(pid);
+    const known = hit && !(hit instanceof Promise);
+    const caseNo = known ? benchmarkCaseNumber(hit.value) : '';
+    const key = `${pid}|${caseNo}|${known}`;
+    const existing = document.getElementById('pd9-bench-btn');
+    if (key === benchKey && (existing || !caseNo)) return;
+    benchKey = key;
+    if (pid && !hit) courtCaseNumber(pid).then(() => { benchKey = ''; addBenchmarkButton(); });
+    if (existing && (existing.dataset.pid !== String(pid) || !caseNo)) existing.remove();
+    if (!caseNo || document.getElementById('pd9-bench-btn')) {
+      const b = document.getElementById('pd9-bench-btn');
+      if (b) { b.dataset.caseNo = caseNo; b.title = `Look up ${caseNo} on the Osceola Clerk's site (opens a new tab)`; }
+      return;
+    }
+    const vitals = [...document.querySelectorAll('.vitals-toggle button, button')].find((b) => /^\s*vitals\s*$/i.test(b.querySelector('.vitals-btn-text')?.textContent || ''));
+    if (!vitals) { benchKey = ''; return; }
+    const btn = vitals.cloneNode(true);
+    btn.id = 'pd9-bench-btn';
+    btn.dataset.pid = String(pid);
+    btn.dataset.caseNo = caseNo;
+    btn.title = `Look up ${caseNo} on the Osceola Clerk's site (opens a new tab)`;
+    const icon = btn.querySelector('i');
+    if (icon) {
+      const hidden = icon.querySelector('.visually-hidden');
+      if (hidden) hidden.textContent = 'slot-text:gavel';
+      const tn = [...icon.childNodes].find((n) => n.nodeType === 3 && n.nodeValue.trim());
+      if (tn) tn.nodeValue = 'gavel ';
+    }
+    const label = btn.querySelector('.vitals-btn-text') || btn.querySelector('.text-container');
+    if (label) label.textContent = 'Benchmark';
+    btn.style.marginRight = '8px';
+    btn.addEventListener('click', async (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      // Open the tab now (so the browser does not block it), then read the
+      // Court Case Number again in case someone just changed it.
+      const tab = window.open('about:blank', '_blank');
+      const fresh = benchmarkCaseNumber(await Promise.race([courtCaseNumber(btn.dataset.pid, true), sleep(2500).then(() => '')])) || btn.dataset.caseNo;
+      if (tab) { try { tab.opener = null; } catch (err) { /* ignore */ } tab.location.href = benchmarkUrl(fresh); }
+      else window.open(benchmarkUrl(fresh), '_blank', 'noopener');
+      benchKey = '';
+    });
+    const holder = vitals.closest('.vitals-toggle') || vitals;
+    holder.before(btn);
+  }
+
   let jailKey = '';
   function addJailButton() {
     const key = `${location.href}|${document.title}`;
@@ -2468,6 +2717,598 @@
       e.preventDefault();
       e.stopPropagation();
       window.open(btn.dataset.url, '_blank', 'noopener');
+    });
+    const holder = vitals.closest('.vitals-toggle') || vitals;
+    holder.before(btn);
+  }
+
+  // ---------- Deposition recorder ----------
+  // A "Record Depo" button sits next to Vitals on every case. It opens a small
+  // recorder with a level meter. Stop saves an audio file named after the case
+  // plus the date and time the recording started, and downloads it.
+  // While recording, each 5 seconds of audio is also kept in this browser
+  // (IndexedDB), so a crash or a closed tab does not lose the deposition.
+  // Nothing is sent to Filevine.
+  const DEPO_MIC_KEY = 'pd9-depo-mic';
+  const DEPO_SLICE_MS = 5000;
+  const DEPO_QUIET_DB = -55;
+  const DEPO_QUIET_MS = 15000;
+  const depo = {
+    panel: null, stream: null, ctx: null, analyser: null, buf: null, tick: 0,
+    rec: null, sid: '', mime: '', ext: '', startedAt: null, elapsedMs: 0, runStart: 0,
+    chunks: [], blobUrl: '', fileName: '', saved: false, quietSince: 0, loudUntil: 0,
+    peak: 0, history: [], wake: null, dbFailed: false,
+  };
+
+  // ----- local backup (IndexedDB) -----
+  let depoDbP = null;
+  function depoDb() {
+    if (!depoDbP) {
+      depoDbP = new Promise((res, rej) => {
+        const r = indexedDB.open('pd9-depo', 1);
+        r.onupgradeneeded = () => {
+          const db = r.result;
+          db.createObjectStore('sessions', { keyPath: 'id' });
+          db.createObjectStore('chunks', { autoIncrement: true }).createIndex('sid', 'sid');
+        };
+        r.onsuccess = () => res(r.result);
+        r.onerror = () => { depoDbP = null; rej(r.error); };
+      });
+    }
+    return depoDbP;
+  }
+  async function depoTx(stores, mode, work) {
+    const db = await depoDb();
+    return new Promise((res, rej) => {
+      const tx = db.transaction(stores, mode);
+      let out;
+      tx.oncomplete = () => res(out);
+      tx.onerror = () => rej(tx.error);
+      tx.onabort = () => rej(tx.error);
+      work(tx, (v) => { out = v; });
+    });
+  }
+  const depoPutSession = (s) => depoTx(['sessions'], 'readwrite', (tx) => tx.objectStore('sessions').put(s));
+  const depoAddChunk = (sid, blob, recMs) => depoTx(['chunks', 'sessions'], 'readwrite', (tx) => {
+    tx.objectStore('chunks').add({ sid, blob });
+    const ss = tx.objectStore('sessions');
+    const g = ss.get(sid);
+    g.onsuccess = () => { if (g.result) ss.put({ ...g.result, updatedAt: Date.now(), recMs, chunks: (g.result.chunks || 0) + 1 }); };
+  });
+  const depoSessions = () => depoTx(['sessions'], 'readonly', (tx, done) => {
+    const r = tx.objectStore('sessions').getAll();
+    r.onsuccess = () => done(r.result || []);
+  });
+  const depoChunks = (sid) => depoTx(['chunks'], 'readonly', (tx, done) => {
+    const r = tx.objectStore('chunks').index('sid').getAll(IDBKeyRange.only(sid));
+    r.onsuccess = () => done((r.result || []).map((c) => c.blob));
+  });
+  const depoDrop = (sid) => depoTx(['chunks', 'sessions'], 'readwrite', (tx) => {
+    tx.objectStore('sessions').delete(sid);
+    const c = tx.objectStore('chunks').index('sid').openCursor(IDBKeyRange.only(sid));
+    c.onsuccess = () => { const cur = c.result; if (cur) { cur.delete(); cur.continue(); } };
+  });
+
+  // ----- names and formats -----
+  function depoFormat() {
+    const MR = window.MediaRecorder;
+    if (!MR) return null;
+    // WebM (Opus) is what Chrome and Edge record best. depoFixLength() adds the
+    // length to the file so players can show it and skip around.
+    const options = [['audio/webm;codecs=opus', 'webm'], ['audio/webm', 'webm']];
+    for (const [mime, ext] of options) { try { if (MR.isTypeSupported(mime)) return { mime, ext }; } catch (e) { /* next */ } }
+    return { mime: '', ext: 'webm' };
+  }
+  function depoStamp(d) {
+    const h = d.getHours() % 12 || 12;
+    const m = String(d.getMinutes()).padStart(2, '0');
+    return `${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}-${d.getFullYear()} ${h}.${m} ${d.getHours() < 12 ? 'AM' : 'PM'}`;
+  }
+  function depoBase(title, when) {
+    const clean = (title || 'Deposition')
+      .replace(/\s*\|\s*/g, ' - ')
+      .replace(/[\\/:*?"<>|\u0000-\u001f]+/g, '-')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .slice(0, 150) || 'Deposition';
+    return `${clean} - Depo ${depoStamp(when)}`;
+  }
+  const depoClock = (ms) => {
+    const s = Math.floor(ms / 1000);
+    return `${String(Math.floor(s / 3600)).padStart(2, '0')}:${String(Math.floor(s / 60) % 60).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`;
+  };
+  const depoRecording = () => !!(depo.rec && depo.rec.state !== 'inactive');
+  const depoElapsed = () => depo.elapsedMs + (depo.rec && depo.rec.state === 'recording' ? performance.now() - depo.runStart : 0);
+
+  // MediaRecorder leaves the length out of WebM files, so most players cannot
+  // show it or skip around. This writes a Duration into the file's Info block.
+  async function depoFixLength(blob, ms) {
+    try {
+      if (!/webm/i.test(blob.type) || !ms) return blob;
+      const head = new Uint8Array(await blob.slice(0, Math.min(blob.size, 65536)).arrayBuffer());
+      const vint = (at, keepMarker) => {
+        const first = head[at];
+        let len = 1;
+        let mask = 0x80;
+        while (len <= 8 && !(first & mask)) { len += 1; mask >>= 1; }
+        if (len > 8 || at + len > head.length) throw new Error('bad vint');
+        let v = keepMarker ? first : first & (mask - 1);
+        for (let i = 1; i < len; i += 1) v = v * 256 + head[at + i];
+        return { v, len };
+      };
+      const el = (at) => {
+        const id = vint(at, true);
+        const size = vint(at + id.len, false);
+        const dataStart = at + id.len + size.len;
+        return { id: id.v, start: at, idLen: id.len, dataStart, end: dataStart + size.v };
+      };
+      const ebml = el(0);
+      if (ebml.id !== 0x1A45DFA3) return blob;
+      const seg = el(ebml.end);
+      if (seg.id !== 0x18538067) return blob;
+      for (let at = seg.dataStart; at < head.length - 8;) {
+        const e = el(at);
+        if (e.id === 0x1F43B675) break; // first Cluster: no Info found
+        if (e.id === 0x1549A966) {
+          if (e.end > head.length) return blob;
+          let scale = 1000000;
+          const keep = [];
+          for (let q = e.dataStart; q < e.end;) {
+            const c = el(q);
+            if (c.id === 0x2AD7B1) { scale = 0; for (let i = c.dataStart; i < c.end; i += 1) scale = scale * 256 + head[i]; }
+            if (c.id !== 0x4489) keep.push(head.slice(c.start, c.end));
+            q = c.end;
+          }
+          const dur = new Uint8Array(11);
+          dur.set([0x44, 0x89, 0x88]);
+          new DataView(dur.buffer).setFloat64(3, (ms * 1e6) / (scale || 1000000));
+          const bodyLen = keep.reduce((n, k) => n + k.length, 0) + dur.length;
+          const size = new Uint8Array(8);
+          size[0] = 0x01;
+          for (let i = 7, v = bodyLen; i >= 1; i -= 1, v = Math.floor(v / 256)) size[i] = v % 256;
+          const parts = [head.slice(0, e.start), head.slice(e.start, e.start + e.idLen), size, ...keep, dur, blob.slice(e.end)];
+          return new Blob(parts, { type: blob.type });
+        }
+        at = e.end;
+      }
+    } catch (e) { /* keep the file as recorded */ }
+    return blob;
+  }
+
+  function depoDownload(blob, name) {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = name;
+    a.style.display = 'none';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    return url;
+  }
+
+  // ----- the panel -----
+  function depoMsg(text, kind) {
+    const el = depo.panel && $('.pd9-depo-msg', depo.panel);
+    if (!el) return;
+    if (el.textContent !== text) el.textContent = text;
+    el.dataset.kind = kind || '';
+  }
+
+  function depoDraw() {
+    const p = depo.panel;
+    if (!p) return;
+    const rec = depoRecording();
+    const paused = rec && depo.rec.state === 'paused';
+    p.dataset.state = rec ? (paused ? 'paused' : 'recording') : (depo.saved ? 'saved' : 'ready');
+    $('[data-act=rec]', p).hidden = rec;
+    $('[data-act=rec]', p).textContent = depo.saved ? 'Start a new recording' : 'Start recording';
+    $('[data-act=pause]', p).hidden = !rec;
+    $('[data-act=pause]', p).textContent = paused ? 'Resume' : 'Pause';
+    $('[data-act=stop]', p).hidden = !rec;
+    $('[data-act=again]', p).hidden = !(depo.saved && depo.blobUrl);
+    $('.pd9-depo-mic', p).disabled = rec;
+    const name = $('.pd9-depo-name', p).value;
+    const ext = depo.ext || (depoFormat() || {}).ext || 'webm';
+    const file = depo.saved && !rec ? depo.fileName : `${depoBase(name, depo.startedAt && rec ? depo.startedAt : new Date())}.${ext}`;
+    $('.pd9-depo-file', p).textContent = file;
+    $('.pd9-depo-file', p).title = file;
+  }
+
+  async function depoListMics() {
+    const sel = depo.panel && $('.pd9-depo-mic', depo.panel);
+    if (!sel || !navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) return;
+    const mics = (await navigator.mediaDevices.enumerateDevices()).filter((d) => d.kind === 'audioinput');
+    const want = store.get(DEPO_MIC_KEY, '');
+    const current = depo.stream && depo.stream.getAudioTracks()[0] && depo.stream.getAudioTracks()[0].getSettings().deviceId;
+    sel.innerHTML = '';
+    mics.forEach((m, i) => {
+      const o = document.createElement('option');
+      o.value = m.deviceId;
+      o.textContent = m.label || `Microphone ${i + 1}`;
+      sel.appendChild(o);
+    });
+    sel.value = current || want || (mics[0] && mics[0].deviceId) || '';
+  }
+
+  async function depoOpenMic() {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) throw new Error('This browser cannot record audio.');
+    depoCloseMic();
+    const id = store.get(DEPO_MIC_KEY, '');
+    const audio = { echoCancellation: false, noiseSuppression: false, autoGainControl: true, channelCount: 1 };
+    let stream;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ audio: id ? { ...audio, deviceId: { exact: id } } : audio });
+    } catch (e) {
+      if (!id || e.name === 'NotAllowedError') throw e;
+      store.set(DEPO_MIC_KEY, ''); // the saved mic is gone, use the default one
+      stream = await navigator.mediaDevices.getUserMedia({ audio });
+    }
+    depo.stream = stream;
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    depo.ctx = new Ctx();
+    const src = depo.ctx.createMediaStreamSource(stream);
+    depo.analyser = depo.ctx.createAnalyser();
+    depo.analyser.fftSize = 2048;
+    depo.buf = new Float32Array(depo.analyser.fftSize);
+    src.connect(depo.analyser);
+    stream.getAudioTracks().forEach((t) => t.addEventListener('ended', () => {
+      if (depoRecording()) { depoStop('The microphone was disconnected. The recording was stopped and saved.'); }
+      else depoMsg('The microphone was disconnected.', 'bad');
+    }));
+    clearInterval(depo.tick);
+    depo.tick = setInterval(depoMeter, 50);
+    await depoListMics();
+    depoMsg(depoRecording() ? 'Recording' : 'Ready. Talk to check the level.', '');
+  }
+
+  function depoCloseMic() {
+    clearInterval(depo.tick);
+    depo.tick = 0;
+    if (depo.stream) depo.stream.getTracks().forEach((t) => t.stop());
+    if (depo.ctx) depo.ctx.close().catch(() => {});
+    depo.stream = depo.ctx = depo.analyser = null;
+  }
+
+  function depoMeter() {
+    const p = depo.panel;
+    if (!p || !depo.analyser) return;
+    if (depo.ctx && depo.ctx.state === 'suspended') depo.ctx.resume().catch(() => {});
+    depo.analyser.getFloatTimeDomainData(depo.buf);
+    let peak = 0;
+    let sum = 0;
+    for (let i = 0; i < depo.buf.length; i += 1) { const v = depo.buf[i]; sum += v * v; if (Math.abs(v) > peak) peak = Math.abs(v); }
+    const rms = Math.sqrt(sum / depo.buf.length);
+    const db = rms > 0 ? 20 * Math.log10(rms) : -100;
+    const level = Math.max(0, Math.min(1, (db + 60) / 60));
+    depo.peak = Math.max(level, depo.peak - 0.01);
+    $('.pd9-depo-fill', p).style.width = `${(level * 100).toFixed(1)}%`;
+    $('.pd9-depo-peak', p).style.left = `${(depo.peak * 100).toFixed(1)}%`;
+    $('.pd9-depo-mini-fill', p).style.width = `${(level * 100).toFixed(1)}%`;
+
+    const now = performance.now();
+    const recording = depoRecording() && depo.rec.state === 'recording';
+    depo.history.push(recording ? level : -level); // negative = not being recorded (drawn grey)
+    if (depo.history.length > 300) depo.history.shift();
+    depoWave();
+
+    const time = depoClock(depoElapsed());
+    $$('.pd9-depo-time', p).forEach((t) => { if (t.textContent !== time) t.textContent = time; });
+
+    // Warnings
+    if (peak >= 0.99) depo.loudUntil = now + 2000;
+    if (recording && db < DEPO_QUIET_DB) { if (!depo.quietSince) depo.quietSince = now; } else depo.quietSince = 0;
+    const quiet = depo.quietSince && now - depo.quietSince > DEPO_QUIET_MS;
+    p.classList.toggle('pd9-depo-quiet', !!quiet);
+    if (!depoRecording()) return;
+    if (depo.rec.state === 'paused') depoMsg('Paused. Nothing is being recorded.', 'warn');
+    else if (quiet) depoMsg('No sound for 15 seconds. Check the microphone.', 'warn');
+    else if (now < depo.loudUntil) depoMsg('Too loud. Move the microphone back a little.', 'warn');
+    else if (depo.dbFailed) depoMsg('Recording. (The crash backup is off in this browser.)', 'warn');
+    else depoMsg('Recording', 'rec');
+  }
+
+  function depoWave() {
+    const c = depo.panel && $('.pd9-depo-wave', depo.panel);
+    if (!c || depo.panel.classList.contains('pd9-depo-mini')) return;
+    const w = c.clientWidth;
+    const h = c.clientHeight;
+    if (!w || !h) return;
+    const dpr = window.devicePixelRatio || 1;
+    if (c.width !== Math.round(w * dpr)) { c.width = Math.round(w * dpr); c.height = Math.round(h * dpr); }
+    const g = c.getContext('2d');
+    g.setTransform(dpr, 0, 0, dpr, 0, 0);
+    g.clearRect(0, 0, w, h);
+    const step = 3;
+    const n = Math.floor(w / step);
+    const hist = depo.history.slice(-n);
+    const x0 = w - hist.length * step;
+    hist.forEach((v, i) => {
+      const lv = Math.abs(v);
+      const bh = Math.max(2, lv * (h - 4));
+      g.fillStyle = v < 0 ? 'rgba(160,170,185,.45)' : lv > 0.9 ? '#f04438' : lv > 0.75 ? '#fdb022' : '#32d583';
+      g.fillRect(x0 + i * step, (h - bh) / 2, step - 1, bh);
+    });
+  }
+
+  async function depoStart() {
+    const p = depo.panel;
+    const name = $('.pd9-depo-name', p).value.trim();
+    if (!name) { depoMsg('Type a name for the file first.', 'bad'); $('.pd9-depo-name', p).focus(); return; }
+    const fmt = depoFormat();
+    if (!fmt) { depoMsg('This browser cannot record audio. Use Chrome or Edge.', 'bad'); return; }
+    try { if (!depo.stream) await depoOpenMic(); } catch (e) { depoMicError(e); return; }
+    if (depo.blobUrl) { URL.revokeObjectURL(depo.blobUrl); depo.blobUrl = ''; }
+    if (depo.sid && depo.saved) depoDrop(depo.sid).catch(() => {});
+    let rec;
+    try {
+      rec = new MediaRecorder(depo.stream, fmt.mime ? { mimeType: fmt.mime, audioBitsPerSecond: 96000 } : { audioBitsPerSecond: 96000 });
+    } catch (e) {
+      rec = new MediaRecorder(depo.stream);
+    }
+    depo.rec = rec;
+    depo.mime = rec.mimeType || fmt.mime || 'audio/webm';
+    depo.ext = /mp4/i.test(depo.mime) ? 'm4a' : 'webm';
+    depo.chunks = [];
+    depo.saved = false;
+    depo.fileName = '';
+    depo.startedAt = new Date();
+    depo.elapsedMs = 0;
+    depo.runStart = performance.now();
+    depo.quietSince = 0;
+    depo.dbFailed = false;
+    depo.sid = `d${Date.now()}`;
+    const sid = depo.sid;
+    depoPutSession({ id: sid, name, ext: depo.ext, mime: depo.mime, startedAt: depo.startedAt.getTime(), updatedAt: Date.now(), chunks: 0, done: false })
+      .catch(() => { depo.dbFailed = true; });
+    rec.addEventListener('dataavailable', (e) => {
+      if (!e.data || !e.data.size) return;
+      depo.chunks.push(e.data);
+      if (!depo.dbFailed) depoAddChunk(sid, e.data, depoElapsed()).catch(() => { depo.dbFailed = true; });
+    });
+    rec.addEventListener('stop', () => depoFinish(sid));
+    rec.addEventListener('error', () => depoStop('The recorder hit an error. What was recorded so far was saved.'));
+    rec.start(DEPO_SLICE_MS);
+    depoKeepAwake(true);
+    depoDraw();
+    depoMsg('Recording', 'rec');
+  }
+
+  function depoPause() {
+    if (!depoRecording()) return;
+    if (depo.rec.state === 'recording') {
+      depo.rec.pause();
+      depo.elapsedMs += performance.now() - depo.runStart;
+    } else {
+      depo.rec.resume();
+      depo.runStart = performance.now();
+    }
+    depoDraw();
+  }
+
+  let depoStopNote = '';
+  function depoStop(note) {
+    if (!depoRecording()) return;
+    depoStopNote = note || '';
+    if (depo.rec.state === 'recording') depo.elapsedMs += performance.now() - depo.runStart;
+    depo.rec.stop(); // the 'stop' event runs depoFinish
+  }
+
+  async function depoFinish(sid) {
+    if (sid !== depo.sid) return;
+    const name = depo.panel ? $('.pd9-depo-name', depo.panel).value.trim() : 'Deposition';
+    const blob = await depoFixLength(new Blob(depo.chunks, { type: depo.mime }), depo.elapsedMs);
+    depo.fileName = `${depoBase(name, depo.startedAt)}.${depo.ext}`;
+    depo.blobUrl = depoDownload(blob, depo.fileName);
+    depo.saved = true;
+    depo.chunks = [];
+    depoKeepAwake(false);
+    // Keep the backup until the panel is closed, in case the download did not land.
+    depoTx(['sessions'], 'readwrite', (tx) => tx.objectStore('sessions').put({
+      id: sid, name, ext: depo.ext, mime: depo.mime, startedAt: depo.startedAt.getTime(), updatedAt: Date.now(), done: true,
+    })).catch(() => {});
+    depoDraw();
+    depoMsg(depoStopNote || `Saved ${depoClock(depo.elapsedMs)} of audio. Check your Downloads folder.`, depoStopNote ? 'warn' : 'ok');
+    depoStopNote = '';
+    if (depo.panel && depo.panel.classList.contains('pd9-depo-mini')) depo.panel.classList.remove('pd9-depo-mini');
+  }
+
+  async function depoKeepAwake(on) {
+    try {
+      if (on && navigator.wakeLock && !depo.wake) depo.wake = await navigator.wakeLock.request('screen');
+      if (!on && depo.wake) { await depo.wake.release(); depo.wake = null; }
+    } catch (e) { depo.wake = null; }
+  }
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible' && depoRecording()) { depo.wake = null; depoKeepAwake(true); }
+  });
+  window.addEventListener('beforeunload', (e) => {
+    if (!depoRecording()) return;
+    e.preventDefault();
+    e.returnValue = 'A deposition is still recording.';
+  });
+
+  function depoMicError(e) {
+    const n = e && e.name;
+    if (n === 'NotAllowedError') depoMsg('Microphone blocked. Click the lock or mic icon in the address bar, allow the microphone, then try again.', 'bad');
+    else if (n === 'NotFoundError') depoMsg('No microphone found. Plug one in and try again.', 'bad');
+    else if (n === 'NotReadableError') depoMsg('Another app is using the microphone. Close it and try again.', 'bad');
+    else depoMsg(`Could not open the microphone. ${(e && e.message) || ''}`.trim(), 'bad');
+  }
+
+  function depoClose() {
+    if (depoRecording()) { depo.panel.classList.add('pd9-depo-mini'); toast('Still recording. Stop the recording before you close the recorder.'); return; }
+    depoCloseMic();
+    if (depo.blobUrl) URL.revokeObjectURL(depo.blobUrl);
+    if (depo.sid && depo.saved) depoDrop(depo.sid).catch(() => {});
+    if (depo.panel) depo.panel.remove();
+    Object.assign(depo, { panel: null, blobUrl: '', sid: '', saved: false, history: [], startedAt: null, elapsedMs: 0, ext: '' });
+  }
+
+  function depoBuild() {
+    const p = document.createElement('div');
+    p.id = 'pd9-depo';
+    p.setAttribute('role', 'dialog');
+    p.setAttribute('aria-label', 'Deposition recorder');
+    p.innerHTML = `
+      <div class="pd9-depo-head">
+        <span class="pd9-depo-dot" aria-hidden="true"></span>
+        <b class="pd9-depo-title">Deposition recorder</b>
+        <span class="pd9-depo-mini-meter" aria-hidden="true"><span class="pd9-depo-mini-fill"></span></span>
+        <span class="pd9-depo-time pd9-depo-mini-time">00:00:00</span>
+        <span class="pd9-depo-grow"></span>
+        <button type="button" data-act="min" class="pd9-depo-icon" title="Make small" aria-label="Make small">&#8211;</button>
+        <button type="button" data-act="close" class="pd9-depo-icon" title="Close" aria-label="Close">&#215;</button>
+      </div>
+      <div class="pd9-depo-body">
+        <div class="pd9-depo-recover" hidden></div>
+        <label class="pd9-depo-field"><span>Case</span><input class="pd9-depo-name" type="text" spellcheck="false" autocomplete="off"></label>
+        <div class="pd9-depo-saveas">Saves as <span class="pd9-depo-file"></span></div>
+        <label class="pd9-depo-field"><span>Microphone</span><select class="pd9-depo-mic"></select></label>
+        <canvas class="pd9-depo-wave" aria-hidden="true"></canvas>
+        <div class="pd9-depo-meter" aria-hidden="true"><div class="pd9-depo-fill"><div class="pd9-depo-grad"></div></div><div class="pd9-depo-peak"></div></div>
+        <div class="pd9-depo-status"><span class="pd9-depo-time pd9-depo-big">00:00:00</span><span class="pd9-depo-msg" role="status" aria-live="polite"></span></div>
+        <div class="pd9-depo-btns">
+          <button type="button" data-act="rec" class="pd9-depo-rec"><span class="pd9-depo-recdot"></span>Start recording</button>
+          <button type="button" data-act="pause" hidden>Pause</button>
+          <button type="button" data-act="stop" class="pd9-depo-stop" hidden>Stop and save</button>
+          <button type="button" data-act="again" hidden>Download again</button>
+        </div>
+      </div>`;
+    // Keep Filevine and the Improver's hotkeys out of the recorder.
+    ['keydown', 'keyup', 'keypress'].forEach((t) => p.addEventListener(t, (e) => { if (e.key !== 'Escape') e.stopPropagation(); }));
+    p.addEventListener('click', (e) => {
+      const b = e.target.closest('button[data-act]');
+      if (b) {
+        const act = b.dataset.act;
+        if (act === 'rec') depoStart();
+        else if (act === 'pause') depoPause();
+        else if (act === 'stop') depoStop();
+        else if (act === 'again' && depo.blobUrl) {
+          const a = document.createElement('a');
+          a.href = depo.blobUrl; a.download = depo.fileName; a.click();
+        } else if (act === 'min') p.classList.toggle('pd9-depo-mini');
+        else if (act === 'close') depoClose();
+        else if (act === 'recover-save' || act === 'recover-drop') depoRecoverAct(b);
+        return;
+      }
+      if (p.classList.contains('pd9-depo-mini') && e.target.closest('.pd9-depo-head')) p.classList.remove('pd9-depo-mini');
+    });
+    $('.pd9-depo-name', p).addEventListener('input', depoDraw);
+    $('.pd9-depo-mic', p).addEventListener('change', async (e) => {
+      store.set(DEPO_MIC_KEY, e.target.value);
+      try { await depoOpenMic(); } catch (err) { depoMicError(err); }
+    });
+    document.body.appendChild(p);
+    return p;
+  }
+
+  async function openDepoRecorder(title) {
+    if (!depo.panel) depo.panel = depoBuild();
+    const p = depo.panel;
+    p.classList.remove('pd9-depo-mini');
+    const box = $('.pd9-depo-name', p);
+    if (!depoRecording() && title) box.value = title;
+    depoDraw();
+    if (!depo.stream) {
+      depoMsg('Asking for the microphone...', '');
+      try { await depoOpenMic(); } catch (e) { depoMicError(e); }
+    }
+    depoDraw();
+    depoCheckRecovery();
+  }
+
+  // ----- recovery after a crash or closed tab -----
+  async function depoCheckRecovery() {
+    let list;
+    try { list = await depoSessions(); } catch (e) { return; }
+    const now = Date.now();
+    for (const s of list) {
+      if (s.id === depo.sid) continue;
+      // Saved fine, or another tab is still recording it.
+      if (s.done) { if (now - s.updatedAt > 60000) depoDrop(s.id).catch(() => {}); continue; }
+      if (now - s.updatedAt < 30000) continue;
+      if (!s.chunks) { depoDrop(s.id).catch(() => {}); continue; }
+      if (!depo.panel) depo.panel = depoBuild();
+      const box = $('.pd9-depo-recover', depo.panel);
+      const mins = Math.max(1, Math.round((s.recMs || s.updatedAt - s.startedAt) / 60000));
+      box.innerHTML = `<b>A recording did not finish saving.</b>
+        <div>${escapeHtml(s.name || 'Deposition')}, started ${new Date(s.startedAt).toLocaleString([], { dateStyle: 'short', timeStyle: 'short' })}, about ${mins} min.</div>
+        <div class="pd9-depo-btns"><button type="button" data-act="recover-save" data-sid="${s.id}" class="pd9-depo-rec">Save it now</button><button type="button" data-act="recover-drop" data-sid="${s.id}">Discard</button></div>`;
+      box.hidden = false;
+      depo.panel.classList.remove('pd9-depo-mini');
+      return;
+    }
+  }
+
+  async function depoRecoverAct(btn) {
+    const sid = btn.dataset.sid;
+    const box = $('.pd9-depo-recover', depo.panel);
+    if (btn.dataset.act === 'recover-drop') {
+      if (!confirmDrop(btn)) return;
+      await depoDrop(sid).catch(() => {});
+      box.hidden = true;
+      depoCheckRecovery();
+      return;
+    }
+    const list = await depoSessions().catch(() => []);
+    const s = list.find((x) => x.id === sid);
+    const parts = await depoChunks(sid).catch(() => []);
+    if (!s || !parts.length) { box.innerHTML = 'Nothing could be recovered.'; return; }
+    const file = `${depoBase(s.name, new Date(s.startedAt))} (recovered).${s.ext || 'webm'}`;
+    const whole = await depoFixLength(new Blob(parts, { type: s.mime || 'audio/webm' }), s.recMs || Math.max(0, (s.updatedAt || s.startedAt) - s.startedAt));
+    const url = depoDownload(whole, file);
+    setTimeout(() => URL.revokeObjectURL(url), 60000);
+    await depoTx(['sessions'], 'readwrite', (tx) => tx.objectStore('sessions').put({ ...s, done: true, updatedAt: Date.now() })).catch(() => {});
+    box.innerHTML = `Saved <b>${escapeHtml(file)}</b>. Check your Downloads folder.`;
+  }
+
+  // "Discard" needs a second click, so a recording is not thrown away by accident.
+  function confirmDrop(btn) {
+    if (btn.dataset.sure) return true;
+    btn.dataset.sure = '1';
+    btn.textContent = 'Click again to discard';
+    setTimeout(() => { if (btn.isConnected) { delete btn.dataset.sure; btn.textContent = 'Discard'; } }, 4000);
+    return false;
+  }
+
+  // Case windows are frames: their button asks the main page to open the recorder,
+  // so the recording keeps going when the window closes.
+  window.addEventListener('message', (e) => {
+    if (IN_FRAME || e.origin !== location.origin || !e.data || e.data.pd9 !== 'depo') return;
+    openDepoRecorder(String(e.data.title || ''));
+  });
+  if (!IN_FRAME) setTimeout(() => { depoSessions().then((l) => { if (l.some((s) => !s.done && s.chunks && Date.now() - s.updatedAt > 30000)) depoCheckRecovery(); }).catch(() => {}); }, 4000);
+
+  let depoKey = '';
+  function addDepoButton() {
+    const key = `${location.href}|${document.title}`;
+    if (key === depoKey && document.getElementById('pd9-depo-btn')) return;
+    depoKey = key;
+    const existing = document.getElementById('pd9-depo-btn');
+    if (!inCase()) { if (existing) existing.remove(); return; }
+    if (existing) return;
+    const vitals = [...document.querySelectorAll('.vitals-toggle button, button')].find((b) => /^\s*vitals\s*$/i.test(b.querySelector('.vitals-btn-text')?.textContent || ''));
+    if (!vitals) return;
+    const btn = vitals.cloneNode(true);
+    btn.id = 'pd9-depo-btn';
+    btn.title = 'Record a deposition. The audio file downloads when you stop.';
+    const icon = btn.querySelector('i');
+    if (icon) {
+      const hidden = icon.querySelector('.visually-hidden');
+      if (hidden) hidden.textContent = 'slot-text:mic';
+      const tn = [...icon.childNodes].find((n) => n.nodeType === 3 && n.nodeValue.trim());
+      if (tn) tn.nodeValue = 'mic ';
+    }
+    const label = btn.querySelector('.vitals-btn-text') || btn.querySelector('.text-container');
+    if (label) label.textContent = 'Record Depo';
+    btn.style.marginRight = '8px';
+    btn.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const title = currentCaseName();
+      if (IN_FRAME) { try { window.top.postMessage({ pd9: 'depo', title }, location.origin); } catch (err) { /* ignore */ } return; }
+      openDepoRecorder(title);
     });
     const holder = vitals.closest('.vitals-toggle') || vitals;
     holder.before(btn);
@@ -3881,8 +4722,8 @@
       try { spare.querySelector('iframe').contentWindow.location.hash = `#/project/${encodeURIComponent(id)}/activity`; } catch (e) { /* ignore */ }
     }, 120);
   }
-  setInterval(() => { if (!IN_FRAME && windowMode() && onHub()) makeSpare(); }, 15000);
-  setTimeout(() => { if (!IN_FRAME && windowMode() && onHub()) makeSpare(); }, 2500); // start warming soon after the page loads
+  setInterval(() => { if (!STAFF && !IN_FRAME && windowMode() && onHub()) makeSpare(); }, 15000);
+  setTimeout(() => { if (!STAFF && !IN_FRAME && windowMode() && onHub()) makeSpare(); }, 2500); // start warming soon after the page loads
 
   function openCaseWindow(id, title, restore, spare = false) {
     const existing = document.querySelector(`.pd9-win:not(.pd9-win-spare)[data-pid="${CSS.escape(String(id))}"]`);
@@ -4640,7 +5481,7 @@
 
   // Ctrl+Space opens it (on a Mac too: Control, not Command), anywhere except while writing a note.
   document.addEventListener('keydown', (e) => {
-    if (e.code !== 'Space' || !e.ctrlKey || e.metaKey || e.altKey || e.shiftKey) return;
+    if (STAFF || e.code !== 'Space' || !e.ctrlKey || e.metaKey || e.altKey || e.shiftKey) return;
     if (composerOf(document.activeElement)) return; // leave the note box alone
     e.preventDefault();
     e.stopImmediatePropagation();
@@ -4648,47 +5489,53 @@
   }, true);
 
   // ---------- Dark mode ----------
-  // One click (the moon button at the top, or Alt+Shift+D) flips Filevine dark.
-  // It works by inverting the page's colors, then flipping pictures, avatars and
-  // file previews back so they look normal. Case windows follow the main page.
+  // Filevine ships its own dark theme (fv-dark) but doesn't offer it to us. This
+  // turns it on, then tunes it: a deep slate palette, softer text, a brighter
+  // teal, and dark styles for the older parts of Filevine and the Improver's own
+  // windows. Turn it on or off in the account menu (under Improver Options) or
+  // with Alt+Shift+D.
   const DARK_KEY = 'pd9-dark';
   const DARK_SKIP = /\/docwebviewer\//i.test(location.pathname); // Filevine's file viewer: leave files as they are
+  const darkOn = () => !!store.get(DARK_KEY, false);
+  let lightTheme = null; // Filevine's own theme name, to put back
+  function setThemeAttr(dark) {
+    const root = document.documentElement;
+    const st = root.getAttribute('style') || '';
+    const m = st.match(/--theme-name:\s*([^;]+);?/);
+    const cur = m ? m[1].trim() : '';
+    if (cur && cur !== 'fv-dark') lightTheme = cur;
+    const want = dark ? 'fv-dark' : (lightTheme || 'fv-light');
+    // Filevine's theme only applies when the style starts with "--theme-name: ...".
+    if (st.startsWith(`--theme-name: ${want}`)) return;
+    const rest = st.replace(/--theme-name:\s*[^;]+;?\s*/, '').trim();
+    root.setAttribute('style', `--theme-name: ${want};${rest ? ` ${rest}` : ''}`);
+  }
   function applyDark() {
-    if (IN_FRAME || DARK_SKIP) return;
-    const on = !!store.get(DARK_KEY, false);
+    if (DARK_SKIP) return;
+    const on = darkOn();
     document.documentElement.classList.toggle('pd9-dark', on);
-    const b = document.getElementById('pd9-dark-btn');
-    if (b) {
-      b.setAttribute('aria-pressed', String(on));
-      b.title = on ? 'Light mode (Alt+Shift+D)' : 'Dark mode (Alt+Shift+D)';
-      b.innerHTML = on
-        ? '<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="none" stroke="currentColor" stroke-width="2"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>'
-        : '<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="M20 14.5A8 8 0 0 1 9.5 4a8 8 0 1 0 10.5 10.5z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></svg>';
-    }
+    if (on || document.documentElement.classList.contains('pd9-was-dark')) setThemeAttr(on);
+    document.documentElement.classList.toggle('pd9-was-dark', on);
+    $$('[data-pd9-dark] .pd9-dark-state').forEach((el) => { el.textContent = on ? 'On' : 'Off'; });
   }
   function toggleDark() {
-    store.set(DARK_KEY, !store.get(DARK_KEY, false));
+    store.set(DARK_KEY, !darkOn());
     applyDark();
+    toast(darkOn() ? 'Dark mode on (Alt+Shift+D to switch)' : 'Dark mode off');
   }
-  function addDarkButton() {
-    if (IN_FRAME || DARK_SKIP || document.getElementById('pd9-dark-btn')) return;
-    const after = document.getElementById('pd9-switch-btn');
-    if (!after) return;
-    const btn = document.createElement('button');
-    btn.id = 'pd9-dark-btn';
-    btn.type = 'button';
-    btn.className = 'pd9-head-btn pd9-dark-btn';
-    btn.setAttribute('aria-label', 'Dark mode');
-    btn.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); toggleDark(); });
-    after.after(btn);
-    applyDark();
-  }
+  // Filevine sometimes rewrites its theme (when it loads, or in a case window): keep ours.
+  new MutationObserver(() => {
+    if (darkOn() && !DARK_SKIP) setThemeAttr(true);
+    if (!IN_FRAME && !document.documentElement.style.getPropertyValue('--pd9-z')) applyWinZoom(); // keep the case-window zoom too
+  })
+    .observe(document.documentElement, { attributes: true, attributeFilter: ['style'] });
   document.addEventListener('keydown', (e) => {
-    if (IN_FRAME || DARK_SKIP) return;
+    if (DARK_SKIP) return;
     if (e.altKey && e.shiftKey && !e.ctrlKey && !e.metaKey && (e.code === 'KeyD' || /^d$/i.test(e.key))) { e.preventDefault(); toggleDark(); }
   }, true);
-  // Another tab changed it: follow along.
+  // Another tab (or the main page, for a case window) changed it: follow along.
   window.addEventListener('focus', () => applyDark());
+  setInterval(() => { if (document.documentElement.classList.contains('pd9-dark') !== darkOn()) applyDark(); }, 2000);
   applyDark();
 
   function addSwitchButton() {
@@ -4938,6 +5785,265 @@
     markPreviewedRow();
   }
 
+
+  // ---------- Task triage (staff edition) ----------
+  // On the Tasks page: a flag on every task (grey until you set it) to sort out
+  // what matters, since due dates are often set wrong.
+  //   Red = do first, Yellow = do soon, Green = can wait.
+  // Sort by Filevine's due date, newest created first, or priority. Show only one
+  // color. Select several tasks and flag them all at once. Hover a task and press
+  // 1 (red), 2 (yellow), 3 (green), or 0 (clear) to flag it from the keyboard.
+  // Flags are kept on this computer for you (Filevine doesn't have a place for them).
+  const TRIAGE_KEY = 'pd9-task-flags';
+  const TRIAGE_VIEW_KEY = 'pd9-task-triage-view';
+  const FLAGS = [
+    { id: 'red', label: 'Red', hint: 'Do first', key: '1' },
+    { id: 'yellow', label: 'Yellow', hint: 'Do soon', key: '2' },
+    { id: 'green', label: 'Green', hint: 'Can wait', key: '3' },
+  ];
+  const FLAG_RANK = { red: 0, yellow: 1, green: 2, '': 3 };
+  const onTasksPage = () => /#\/tasks\b/i.test(location.hash);
+  const triageView = () => ({ sort: 'due', show: 'all', ...(store.get(TRIAGE_VIEW_KEY, null) || {}) });
+  const setTriageView = (patch) => store.set(TRIAGE_VIEW_KEY, { ...triageView(), ...patch });
+  let triageSelecting = false;
+  const triagePicked = new Set();
+  let triageHover = null;
+
+  function flagStore() {
+    const all = store.get(TRIAGE_KEY, null) || {};
+    return all;
+  }
+  function setFlag(keys, flag) {
+    const all = flagStore();
+    const now = Date.now();
+    for (const k of keys) { if (flag) all[k] = { f: flag, at: now }; else delete all[k]; }
+    // Forget flags nobody has touched in 6 months (finished tasks drop off the list).
+    for (const [k, v] of Object.entries(all)) if (now - (v.at || 0) > 182 * 864e5) delete all[k];
+    store.set(TRIAGE_KEY, all);
+  }
+
+  // What we know about a task card: a stable key (case + when it was made + subject + text),
+  // the created time, and the case.
+  function taskInfo(li) {
+    if (li._pd9t) return li._pd9t;
+    const link = $('.activity-item-project-link a, a.project-link', li);
+    const pid = link ? ((link.getAttribute('href') || '').match(/\/project\/(\d+)/) || [])[1] || '' : '';
+    const byline = $$('.byline-container .tertiary-text', li).map((el) => el.textContent.trim());
+    const stamp = byline.find((t) => /\d{1,2}\/\d{1,2}\/\d{4}/.test(t)) || '';
+    const subject = (($('.byline-container .subject', li) || {}).textContent || '').trim();
+    const body = (($('.activity-text-body', li) || {}).textContent || '').replace(/\s+/g, ' ').trim().slice(0, 80);
+    const m = stamp.match(/(\d{1,2})\/(\d{1,2})\/(\d{4})(?:\D+(\d{1,2}):(\d{2})\s*([AP]M))?/i);
+    let created = null;
+    if (m) {
+      let h = +(m[4] || 0);
+      if (m[6]) { if (/pm/i.test(m[6]) && h < 12) h += 12; if (/am/i.test(m[6]) && h === 12) h = 0; }
+      created = new Date(+m[3], +m[1] - 1, +m[2], h, +(m[5] || 0));
+    }
+    const info = { key: `${pid}|${stamp}|${subject}|${body}`, created, pid };
+    if (pid && stamp) li._pd9t = info; // only keep it once the card has finished drawing
+    return info;
+  }
+  const flagOf = (li) => { const f = flagStore()[taskInfo(li).key]; return f ? f.f : ''; };
+
+  function flagIcon(color) {
+    return `<svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M6 21V4M6 4h10l-2 4 2 4H6" fill="${color ? 'currentColor' : 'none'}" stroke="currentColor" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/></svg>`;
+  }
+
+  function openFlagMenu(anchor, keys, after) {
+    document.querySelectorAll('.pd9-flag-menu').forEach((m) => m.remove());
+    const menu = document.createElement('div');
+    menu.className = 'pd9-flag-menu';
+    menu.setAttribute('role', 'menu');
+    menu.innerHTML = FLAGS.map((f) => `<button type="button" role="menuitem" data-flag="${f.id}"><span class="pd9-fdot pd9-f-${f.id}"></span><b>${f.label}</b><span>${f.hint}</span><kbd class="pd9-kbd">${f.key}</kbd></button>`).join('')
+      + '<button type="button" role="menuitem" data-flag=""><span class="pd9-fdot"></span><b>No flag</b><span>Clear</span><kbd class="pd9-kbd">0</kbd></button>';
+    document.body.appendChild(menu);
+    const r = anchor.getBoundingClientRect();
+    menu.style.left = `${Math.max(8, Math.min(r.left, window.innerWidth - 230))}px`;
+    menu.style.top = `${Math.min(r.bottom + 6, window.innerHeight - 200)}px`;
+    const close = () => { menu.remove(); document.removeEventListener('mousedown', outside, true); document.removeEventListener('keydown', onKey, true); };
+    const pick = (flag) => { setFlag(keys, flag); close(); if (after) after(); drawTriage(); };
+    const outside = (e) => { if (!menu.contains(e.target) && e.target !== anchor) close(); };
+    const onKey = (e) => {
+      if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); close(); return; }
+      const f = FLAGS.find((x) => x.key === e.key);
+      if (f) { e.preventDefault(); e.stopPropagation(); pick(f.id); } else if (e.key === '0') { e.preventDefault(); e.stopPropagation(); pick(''); }
+    };
+    menu.addEventListener('click', (e) => { const b = e.target.closest('button[data-flag]'); if (b) { e.stopPropagation(); pick(b.dataset.flag); } });
+    setTimeout(() => { document.addEventListener('mousedown', outside, true); document.addEventListener('keydown', onKey, true); }, 0);
+    menu.querySelector('button').focus();
+  }
+
+  // Keep Filevine from opening the task when you use our controls.
+  const stopForFilevine = (el) => ['pointerdown', 'mousedown', 'mouseup', 'click', 'keydown'].forEach((t) => el.addEventListener(t, (e) => {
+    if (t === 'keydown' && e.key !== 'Enter' && e.key !== ' ') return;
+    e.stopPropagation();
+  }));
+
+  function decorateTask(li) {
+    const left = $('.item-left', li);
+    if (!left) return;
+    if (!$('.pd9-flag-btn', li)) {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'pd9-flag-btn';
+      stopForFilevine(b);
+      b.addEventListener('click', (e) => { e.preventDefault(); openFlagMenu(b, [taskInfo(li).key]); });
+      left.appendChild(b);
+      const cb = document.createElement('input');
+      cb.type = 'checkbox';
+      cb.className = 'pd9-tri-pick';
+      stopForFilevine(cb);
+      cb.addEventListener('change', () => { const k = taskInfo(li).key; if (cb.checked) triagePicked.add(k); else triagePicked.delete(k); drawTriage(); });
+      left.prepend(cb);
+      li.addEventListener('mouseenter', () => { triageHover = li; });
+      li.addEventListener('mouseleave', () => { if (triageHover === li) triageHover = null; });
+    }
+    const f = flagOf(li);
+    const btn = $('.pd9-flag-btn', li);
+    const meta = FLAGS.find((x) => x.id === f);
+    if (btn.dataset.flag !== f) {
+      btn.dataset.flag = f;
+      btn.innerHTML = flagIcon(f);
+      btn.title = meta ? `${meta.label}: ${meta.hint}. Click to change (or hover and press 1, 2, 3, 0).` : 'Not flagged. Click to flag (or hover and press 1, 2, 3).';
+      btn.setAttribute('aria-label', meta ? `Flag: ${meta.label}. Change` : 'Set flag');
+    }
+    li.dataset.pd9Flag = f;
+    const cb = $('.pd9-tri-pick', li);
+    cb.checked = triagePicked.has(taskInfo(li).key);
+    cb.setAttribute('aria-label', `Select task: ${(($('.byline-container .subject', li) || $('.project-name', li) || {}).textContent || '').trim()}`);
+  }
+
+  // Quick search: every word typed must appear somewhere in the task card.
+  let triageQuery = '';
+  const taskText = (li) => (li.textContent || '').replace(/\s+/g, ' ').toLowerCase();
+  const matchesQuery = (li) => {
+    const words = triageQuery.toLowerCase().split(/\s+/).filter(Boolean);
+    if (!words.length) return true;
+    const t = taskText(li);
+    return words.every((w) => t.includes(w));
+  };
+
+  function drawTriage() {
+    if (!onTasksPage()) return;
+    const items = $$('ul.activity-group-list > li.activity-list-item');
+    const view = triageView();
+    items.forEach(decorateTask);
+    document.documentElement.classList.toggle('pd9-tri-selecting', triageSelecting);
+
+    // Sort with CSS order, so Filevine's own list stays untouched underneath.
+    $$('ul.activity-group-list').forEach((ul) => ul.classList.toggle('pd9-tri-sorted', view.sort !== 'due'));
+    const created = (li) => { const c = taskInfo(li).created; return c ? c.getTime() : 0; };
+    const ordered = items.slice();
+    if (view.sort === 'new') ordered.sort((a, b) => created(b) - created(a));
+    if (view.sort === 'priority') ordered.sort((a, b) => FLAG_RANK[flagOf(a)] - FLAG_RANK[flagOf(b)] || created(b) - created(a));
+    ordered.forEach((li, i) => { li.style.order = view.sort === 'due' ? '' : String(i); });
+
+    // Show only one color.
+    const counts = { all: items.length, red: 0, yellow: 0, green: 0, none: 0 };
+    const found = items.filter(matchesQuery);
+    counts.all = found.length;
+    found.forEach((li) => { const f = flagOf(li); counts[f || 'none'] += 1; });
+    items.forEach((li) => {
+      const f = flagOf(li) || 'none';
+      li.classList.toggle('pd9-tri-hide', !matchesQuery(li) || (view.show !== 'all' && view.show !== f));
+    });
+    const shownCount = items.filter((li) => !li.classList.contains('pd9-tri-hide')).length;
+
+    // The bar above the list.
+    const host = $('.activity-content');
+    if (!host) return;
+    let bar = $('#pd9-triage');
+    if (!bar) {
+      bar = document.createElement('div');
+      bar.id = 'pd9-triage';
+      bar.setAttribute('role', 'toolbar');
+      bar.setAttribute('aria-label', 'Task triage');
+      host.parentNode.insertBefore(bar, host);
+      // The search box is built once, so redrawing the rest never steals focus.
+      const find = document.createElement('div');
+      find.className = 'pd9-tri-find';
+      find.innerHTML = `<input type="search" placeholder="Search tasks" aria-label="Search tasks. Matches any text in the task, like a word or a date such as 9/28." autocomplete="off" spellcheck="false"><span class="pd9-tri-none" hidden>No matches</span>`;
+      const box = find.querySelector('input');
+      box.value = triageQuery;
+      box.addEventListener('input', () => { triageQuery = box.value; drawTriage(); });
+      box.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape' && box.value) { e.stopPropagation(); box.value = ''; triageQuery = ''; drawTriage(); }
+      });
+      ['keydown', 'keyup', 'keypress'].forEach((t) => box.addEventListener(t, (e) => e.stopPropagation()));
+      const dyn = document.createElement('div');
+      dyn.className = 'pd9-tri-dyn';
+      bar.append(find, dyn);
+      bar.addEventListener('click', (e) => {
+        const b = e.target.closest('button');
+        if (!b) return;
+        if (b.dataset.sort) { setTriageView({ sort: b.dataset.sort }); }
+        else if (b.dataset.show) { setTriageView({ show: b.dataset.show }); }
+        else if (b.dataset.act === 'select') { triageSelecting = !triageSelecting; if (!triageSelecting) triagePicked.clear(); }
+        else if (b.dataset.act === 'all') {
+          const shown = items.filter((li) => !li.classList.contains('pd9-tri-hide'));
+          const keys = $$('ul.activity-group-list > li.activity-list-item').filter((li) => !li.classList.contains('pd9-tri-hide')).map((li) => taskInfo(li).key);
+          const allOn = keys.length && keys.every((k) => triagePicked.has(k));
+          keys.forEach((k) => (allOn ? triagePicked.delete(k) : triagePicked.add(k)));
+          void shown;
+        } else if (b.dataset.bulk !== undefined) {
+          if (!triagePicked.size) { toast('Select tasks first.'); return; }
+          setFlag([...triagePicked], b.dataset.bulk);
+          const n = triagePicked.size;
+          const meta = FLAGS.find((x) => x.id === b.dataset.bulk);
+          toast(meta ? `Flagged ${n} task${n === 1 ? '' : 's'} ${meta.label.toLowerCase()}.` : `Cleared ${n} flag${n === 1 ? '' : 's'}.`);
+          triagePicked.clear();
+        }
+        drawTriage();
+      });
+    }
+    const seg = (key, val, label) => `<button type="button" data-${key}="${val}" aria-pressed="${view[key] === val}">${label}</button>`;
+    const pickedShown = $$('ul.activity-group-list > li.activity-list-item').filter((li) => !li.classList.contains('pd9-tri-hide')).map((li) => taskInfo(li).key);
+    const allPicked = pickedShown.length && pickedShown.every((k) => triagePicked.has(k));
+    const html = `
+      <div class="pd9-tri-group"><span class="pd9-tri-label">Sort</span>
+        <div class="pd9-tri-seg">${seg('sort', 'due', 'Due date')}${seg('sort', 'new', 'Newest')}${seg('sort', 'priority', 'Priority')}</div></div>
+      <div class="pd9-tri-group"><span class="pd9-tri-label">Show</span>
+        <div class="pd9-tri-chips">
+          ${seg('show', 'all', `All <span class="pd9-tri-n">${counts.all}</span>`)}
+          ${FLAGS.map((f) => seg('show', f.id, `<span class="pd9-fdot pd9-f-${f.id}"></span>${f.label} <span class="pd9-tri-n">${counts[f.id]}</span>`)).join('')}
+          ${seg('show', 'none', `<span class="pd9-fdot"></span>Not flagged <span class="pd9-tri-n">${counts.none}</span>`)}
+        </div></div>
+      <div class="pd9-tri-grow"></div>
+      ${triageSelecting ? `
+        <div class="pd9-tri-bulk">
+          <button type="button" data-act="all">${allPicked ? 'Unselect all' : 'Select all shown'}</button>
+          <span class="pd9-tri-count">${triagePicked.size} selected</span>
+          ${FLAGS.map((f) => `<button type="button" class="pd9-tri-flagbtn" data-bulk="${f.id}" title="Flag selected ${f.label.toLowerCase()}"><span class="pd9-fdot pd9-f-${f.id}"></span>${f.label}</button>`).join('')}
+          <button type="button" class="pd9-tri-flagbtn" data-bulk="" title="Remove the flag from selected tasks">Clear</button>
+          <button type="button" data-act="select" class="pd9-tri-done">Done</button>
+        </div>` : '<button type="button" data-act="select" class="pd9-tri-select">Select tasks</button>'}`;
+    const dyn = $('.pd9-tri-dyn', bar);
+    if (dyn._html !== html) { dyn._html = html; dyn.innerHTML = html; }
+    const none = $('.pd9-tri-none', bar);
+    if (none) none.hidden = !(triageQuery.trim() && !shownCount);
+  }
+
+  // Hover a task and press 1, 2, 3 or 0 to flag it.
+  document.addEventListener('keydown', (e) => {
+    if (!STAFF || !onTasksPage() || !triageHover || !triageHover.isConnected) return;
+    if (e.ctrlKey || e.metaKey || e.altKey || isTyping(e) || document.querySelector('.pd9-flag-menu')) return;
+    const f = FLAGS.find((x) => x.key === e.key);
+    if (!f && e.key !== '0') return;
+    e.preventDefault();
+    setFlag([taskInfo(triageHover).key], f ? f.id : '');
+    drawTriage();
+  }, true);
+
+  function addTaskTriage() {
+    if (!onTasksPage()) {
+      const bar = document.getElementById('pd9-triage');
+      if (bar) bar.remove();
+      document.documentElement.classList.remove('pd9-tri-selecting');
+      return;
+    }
+    drawTriage();
+  }
+
   function decorate() {
     watchProject();
     addOptionsMenuItem();
@@ -4947,15 +6053,19 @@
       addCaseSearchButton();
       applyCaseFilter();
       keepAdvanced();
-      rewriteHubLinks();
-      showHubEvents();
-      showOwnTable();
-      keepCaseWindows();
+      if (!STAFF) {
+        rewriteHubLinks();
+        showHubEvents();
+        showOwnTable();
+        keepCaseWindows();
+      }
+      if (STAFF) addTaskTriage();
     }
     makeComposerMovable();
     addJailButton();
-    addSwitchButton();
-    addDarkButton();
+    addBenchmarkButton();
+    addDepoButton();
+    if (!STAFF) addSwitchButton();
     addDocPreview();
     for (const form of $$(COMPOSERS)) {
       const layout = $(SEL.layout, form);
@@ -5734,14 +6844,220 @@
     .pd9-tag-edit .pd9-te-note:empty { display: none; }
     .pd9-tag-edit .pd9-te-bad { color: #b42318; }
     .pd9-tag-edit.pd9-te-busy .pd9-te-list, .pd9-tag-edit.pd9-te-busy .pd9-te-on { opacity: .5; pointer-events: none; }
-    /* Dark mode: invert the page, then flip pictures and file previews back */
-    html.pd9-dark { background: #fff !important; filter: invert(1) hue-rotate(180deg) contrast(.86) brightness(1.06); }
-    html.pd9-dark img, html.pd9-dark video, html.pd9-dark picture, html.pd9-dark canvas,
-    html.pd9-dark [style*="background-image"], html.pd9-dark .fvs-avatar, html.pd9-dark .pd9-av,
-    html.pd9-dark #pd9-docprev iframe, html.pd9-dark .pd9-bc-frame iframe { filter: invert(1) hue-rotate(180deg); }
-    html.pd9-dark #pd9-docprev iframe { filter: invert(1) hue-rotate(180deg) brightness(.94); }
-    html.pd9-dark .pd9-av img, html.pd9-dark .fvs-avatar img, html.pd9-dark [style*="background-image"] img { filter: none; }
-    .pd9-dark-btn { padding-left: 8px !important; padding-right: 8px !important; }
+    /* ---------- Dark mode ----------
+       Palette: canvas #0d0f13, surface #15181d, raised #1b1f25, hover #222730,
+       line #262b33, line strong #343a44, text #e6e8ec, muted #a3aab6, faint #737b88, teal #2fbfae. */
+    :root.pd9-dark[style] {
+      color-scheme: dark;
+      --t-color-surface: #1b1f25; --t-color-text: #e6e8ec; --t-color-border: #343a44;
+      --t-color-background-primary: #15181d; --t-color-background-content: #15181d; --t-color-background-page-title: #15181d;
+      --t-color-background-secondary: #1b1f25; --t-color-background-alternate: #111317; --t-color-background-tertiary: #0d0f13;
+      --t-color-background-header: #0d0f13; --t-color-background-logo-badge: #0d0f13;
+      --t-color-background-text-input: #1b1f25; --t-color-background-select: #1b1f25; --t-color-background-datepicker: #1b1f25;
+      --t-color-background-menu: #1b1f25; --t-color-background-menu-item-rest: #1b1f25; --t-color-background-menu-item-hover: #262b34;
+      --t-color-background-dropdown-primary: #1b1f25; --t-color-background-dialog: #181b21; --t-color-background-drawer: #181b21; --t-color-background-drawer-elevated: #1d2128;
+      --t-color-background-snackbar: #1d2128; --t-color-background-tooltip: #2a303a;
+      --t-color-background-ag-grid: #15181d; --t-color-background-header-ag-grid: #191c22; --t-color-background-subheader-ag-grid: #15181d;
+      --t-color-background-hover-row-ag-grid: #1d2229; --t-color-background-row-selected-ag-grid: #17302d;
+      --t-color-background-control-panel-ag-grid: #191c22; --t-color-background-paging-panel-ag-grid: #191c22; --t-color-background-toolbar-subheader-ag-grid: #191c22;
+      --t-color-background-cell-editor-focused-ag-grid: #1d2229;
+      --t-color-background-tab-unselected: #15181d; --t-color-background-tab-hover: #1d2229;
+      --t-color-background-secondary-nav-item-active: #17302d;
+      --t-color-background-skeleton: #20252d; --t-color-background-skeleton-dark: #262c35;
+      --t-color-background-dialog-skrim: rgb(0 0 0 / 55%); --t-color-background-dialog-skrim-blurred: rgb(13 15 19 / 70%);
+      --t-color-background-control-active: #22a596; --t-color-background-control-active-hover: #2fbfae;
+      --t-color-background-button-primary-rest: #1f9385; --t-color-background-button-primary-hover: #25a797; --t-color-background-button-primary-active: #1a7d72;
+      --t-color-background-toggle-active: #22a596; --t-color-background-tab-selected: #2fbfae;
+      --t-color-border-primary: #262b33; --t-color-border-secondary: #343a44; --t-color-border-tertiary: #4a5260;
+      --t-color-border-ag-grid: #232830; --t-color-border-secondary-ag-grid: #232830; --t-color-border-drawer: #262b33; --t-color-border-page-title: #262b33;
+      --t-color-border-text-input-unfocused: #343a44; --t-color-border-select-closed: #343a44; --t-color-border-text-input-focused: #2fbfae;
+      --t-color-text-primary: #e6e8ec; --t-color-text-secondary: #a3aab6; --t-color-text-tertiary: #737b88; --t-color-text-disabled: #4f5663;
+      --t-color-text-icon: #c3c9d3; --t-color-text-tab-unselected: #a3aab6; --t-color-text-tab-hover: #e6e8ec; --t-color-text-tab-selected: #4fd1c1;
+      --t-color-text-link-rest: #4fd1c1; --t-color-text-link-visited: #4fd1c1; --t-color-text-link-hover: #7fe0d4; --t-color-text-link-active: #2fbfae;
+      --t-color-text-brand: #4fd1c1; --t-color-text-secondary-nav-item-active: #4fd1c1;
+      background: #0d0f13;
+    }
+    html.pd9-dark, html.pd9-dark body { background: #0d0f13 !important; color: #e6e8ec; }
+    /* Scrollbars */
+    html.pd9-dark * { scrollbar-color: #39404b transparent; }
+    html.pd9-dark ::-webkit-scrollbar { width: 11px; height: 11px; }
+    html.pd9-dark ::-webkit-scrollbar-thumb { background: #39404b; border-radius: 8px; border: 3px solid transparent; background-clip: padding-box; }
+    html.pd9-dark ::-webkit-scrollbar-thumb:hover { background-color: #4a5260; }
+    html.pd9-dark ::-webkit-scrollbar-track { background: transparent; }
+    html.pd9-dark ::selection { background: rgba(47, 191, 174, .35); }
+    /* Older Filevine parts (forms, panels, lists) that don't use the theme colors */
+    html.pd9-dark .form-control, html.pd9-dark input[type="text"], html.pd9-dark input[type="search"], html.pd9-dark input[type="email"], html.pd9-dark input[type="number"],
+    html.pd9-dark input[type="tel"], html.pd9-dark input[type="date"], html.pd9-dark textarea, html.pd9-dark select {
+      background-color: #1b1f25 !important; color: #e6e8ec !important; border-color: #343a44 !important;
+    }
+    html.pd9-dark .form-control:focus, html.pd9-dark textarea:focus, html.pd9-dark input:focus { border-color: #2fbfae !important; box-shadow: 0 0 0 3px rgba(47, 191, 174, .18) !important; }
+    html.pd9-dark ::placeholder { color: #737b88 !important; }
+    html.pd9-dark .panel, html.pd9-dark .well, html.pd9-dark .card, html.pd9-dark .modal-content, html.pd9-dark .popover, html.pd9-dark .dropdown-menu,
+    html.pd9-dark .list-group-item, html.pd9-dark .uib-datepicker-popup, html.pd9-dark .panel-heading, html.pd9-dark .panel-body, html.pd9-dark .panel-footer {
+      background-color: #181b21 !important; color: #e6e8ec !important; border-color: #262b33 !important;
+    }
+    html.pd9-dark .dropdown-menu > li > a, html.pd9-dark .dropdown-menu > li > button { color: #e6e8ec !important; }
+    html.pd9-dark .dropdown-menu > li > a:hover, html.pd9-dark .dropdown-menu > .active > a, html.pd9-dark .dropdown-menu > li > a:focus { background-color: #262b34 !important; color: #fff !important; }
+    html.pd9-dark .table > thead > tr > th, html.pd9-dark .table > tbody > tr > td, html.pd9-dark .table td, html.pd9-dark .table th { border-color: #262b33 !important; }
+    html.pd9-dark .table-striped > tbody > tr:nth-of-type(odd) { background-color: #171a1f !important; }
+    html.pd9-dark .table-hover > tbody > tr:hover { background-color: #1d2229 !important; }
+    html.pd9-dark .btn-default { background-color: #1f242b !important; color: #e6e8ec !important; border-color: #343a44 !important; }
+    html.pd9-dark .btn-default:hover { background-color: #262c35 !important; }
+    html.pd9-dark hr { border-color: #262b33 !important; }
+    html.pd9-dark .text-muted, html.pd9-dark .help-block { color: #8b93a0 !important; }
+    html.pd9-dark .bg-white, html.pd9-dark .bg-light { background-color: #15181d !important; }
+    html.pd9-dark .modal-backdrop.in { opacity: .6 !important; }
+    html.pd9-dark img:not([src*=".svg"]) { filter: brightness(.92); }
+    /* The Improver's own windows and tables */
+    html.pd9-dark #pd9-hub-sorted { --ink: #e6e8ec; --slate: #a3aab6; --line: #232830; --head: #191c22; --accent: #2fbfae; --soon: #ff8a4c; background: #15181d; }
+    html.pd9-dark #pd9-hub-sorted tbody tr:nth-child(even) { background: #171a20; }
+    html.pd9-dark #pd9-hub-sorted tbody tr:hover { background: #1c2128; }
+    html.pd9-dark #pd9-hub-sorted tbody tr.pd9-picked { background: #17302d !important; }
+    html.pd9-dark .pd9-charges-modal .pd9-charges-table tr:nth-child(even) td { background: rgba(255, 255, 255, .03); }
+    html.pd9-dark #pd9-hub-sorted tr.pd9-pinned-row td { background: #14211f; }
+    html.pd9-dark #pd9-hub-sorted tr.pd9-pin-last td { box-shadow: inset 0 -2px 0 #1f3a36; }
+    html.pd9-dark #pd9-hub-sorted .pd9-tag { background: color-mix(in srgb, var(--pd9-tag, var(--accent)) 18%, #15181d); color: color-mix(in srgb, var(--pd9-tag, var(--accent)) 70%, #fff); }
+    html.pd9-dark #pd9-hub-sorted .pd9-bulk-btn, html.pd9-dark #pd9-hub-sorted .pd9-tm-notbtn { background: #1f242b; border-color: #343a44; color: #e6e8ec; }
+    html.pd9-dark #pd9-hub-sorted .pd9-bulk-primary { background: #1f9385; border-color: #1f9385; color: #fff; }
+    html.pd9-dark #pd9-hub-sorted .pd9-tag-menu, html.pd9-dark .pd9-tag-edit { background: #1b1f25; color: #e6e8ec; box-shadow: 0 0 0 1px #2c323c, 0 18px 40px -12px rgba(0, 0, 0, .7); }
+    html.pd9-dark #pd9-hub-sorted .pd9-tm-mode button[aria-checked="true"] { background: #2a303a; color: #e6e8ec; }
+    html.pd9-dark #pd9-hub-sorted .pd9-tag-add:hover { background: #17302d; }
+    html.pd9-dark .pd9-tag-edit .pd9-te-find { background: #15181d; color: #e6e8ec; border-color: #343a44; }
+    html.pd9-dark .pd9-tag-edit .pd9-te-list li.pd9-te-active, html.pd9-dark .pd9-tag-edit .pd9-te-list li[role="option"]:hover { background: #17302d; }
+    html.pd9-dark .pd9-tag-edit .pd9-te-chip { background: color-mix(in srgb, var(--pd9-tag, #2fbfae) 18%, #1b1f25); color: color-mix(in srgb, var(--pd9-tag, #2fbfae) 70%, #fff); }
+    html.pd9-dark .pd9-overlay .pd9-primary, html.pd9-dark .pd9-panel .pd9-primary, html.pd9-dark #pd9-case .pd9-primary, html.pd9-dark #pd9-adv .pd9-primary { background: #1f9385; border-color: #1f9385; }
+    html.pd9-dark .pd9-overlay .pd9-dialog, html.pd9-dark #pd9-case, html.pd9-dark #pd9-adv, html.pd9-dark .pd9-panel { box-shadow: 0 0 0 1px #2c323c, 0 24px 60px -20px rgba(0, 0, 0, .8); }
+    html.pd9-dark .pd9-zoomopt select { background: #1b1f25; color: #e6e8ec; border-color: #343a44; }
+    html.pd9-dark .pd9-win { background: #15181d; box-shadow: 0 0 0 1px #2c323c, 0 24px 60px -20px rgba(0, 0, 0, .8); }
+    html.pd9-dark .pd9-win-head { background: #191c22; border-bottom-color: #262b33; }
+    html.pd9-dark .pd9-win-focus .pd9-win-head { background: #17302d; }
+    html.pd9-dark .pd9-win-title { color: #e6e8ec; }
+    html.pd9-dark .pd9-win-btn { color: #a3aab6; }
+    html.pd9-dark .pd9-win-btn:hover { background: rgba(255, 255, 255, .08); color: #fff; }
+    html.pd9-dark .pd9-win-body iframe { background: #15181d; }
+    html.pd9-dark #pd9-taskbar { background: rgba(21, 24, 29, .88); box-shadow: 0 0 0 1px #2c323c, 0 12px 30px -10px rgba(0, 0, 0, .7); }
+    html.pd9-dark .pd9-task { color: #e6e8ec; }
+    html.pd9-dark #pd9-switch .pd9-sw-panel { background: rgba(24, 27, 33, .94); color: #e6e8ec; box-shadow: 0 0 0 1px #2c323c, 0 30px 80px -20px rgba(0, 0, 0, .85); }
+    html.pd9-dark #pd9-switch .pd9-sw-sel { background: #1f9385; }
+    html.pd9-dark #pd9-switch kbd, html.pd9-dark .pd9-kbd { background: rgba(255, 255, 255, .08); box-shadow: inset 0 -1px 0 rgba(255, 255, 255, .12); }
+    html.pd9-dark #pd9-docprev { background: #15181d; box-shadow: -12px 0 40px -16px rgba(0, 0, 0, .8), -1px 0 0 #262b33; }
+    html.pd9-dark #pd9-docprev .pd9-dp-head { background: #191c22; border-bottom-color: #262b33; }
+    html.pd9-dark #pd9-docprev .pd9-dp-title { color: #e6e8ec; }
+    html.pd9-dark #pd9-docprev .pd9-dp-btn { color: #a3aab6; }
+    html.pd9-dark #pd9-docprev .pd9-dp-btn:hover:not(:disabled) { background: rgba(255, 255, 255, .08); color: #fff; }
+    html.pd9-dark #pd9-docprev .pd9-dp-body { background: #0d0f13; }
+    html.pd9-dark #pd9-docprev .pd9-dp-msg { background: #15181d; color: #a3aab6; }
+    html.pd9-dark .ag-row.pd9-doc-current { background: #17302d !important; box-shadow: inset 3px 0 0 #2fbfae; }
+    html.pd9-dark .pd9-doc-eye { color: #a3aab6; }
+    html.pd9-dark .pd9-doc-eye:hover { background: rgba(255, 255, 255, .08); color: #fff; }
+    html.pd9-dark .pd9-bc-tpl, html.pd9-dark .pd9-bc-types button.pd9-on { background: #1f242b; color: #4fd1c1; border-color: #343a44; }
+    html.pd9-dark .pd9-bc-frame { background: #111317; box-shadow: 0 0 0 1px #262b33; }
+    html.pd9-dark #pd9-adv .pd9-charges-btn, html.pd9-dark #pd9-hub-sorted .pd9-charges-btn { color: #4fd1c1; }
+    html.pd9-dark #pd9-adv .pd9-charges-btn:hover, html.pd9-dark #pd9-hub-sorted .pd9-charges-btn:hover { background: #17302d; }
+    html.pd9-dark .fvqn-toast { background: #2a303a; box-shadow: 0 8px 24px -8px rgba(0, 0, 0, .7); }
+    /* Task triage (staff edition) */
+    #pd9-triage { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 18px; margin: 4px 0 10px; padding: 10px 14px; border-radius: 10px;
+      background: var(--t-color-background-secondary, #f6f7f9); border: 1px solid var(--t-color-border-primary, #e4e7ec); font-size: 13px; color: var(--t-color-text-primary, #1d2433); }
+    #pd9-triage button { font: inherit; cursor: pointer; color: inherit; }
+    .pd9-tri-group { display: flex; align-items: center; gap: 8px; }
+    .pd9-tri-label { color: var(--t-color-text-secondary, #667085); font-weight: 600; }
+    .pd9-tri-seg { display: inline-flex; padding: 2px; border-radius: 8px; background: rgba(16, 24, 40, .06); }
+    .pd9-tri-seg button { border: 0; background: none; padding: 5px 12px; border-radius: 6px; font-weight: 500; }
+    .pd9-tri-seg button[aria-pressed="true"] { background: var(--t-color-background-primary, #fff); font-weight: 600; box-shadow: 0 1px 2px rgba(16, 24, 40, .15); }
+    .pd9-tri-dyn { display: contents; }
+    .pd9-tri-find { display: flex; align-items: center; gap: 8px; }
+    .pd9-tri-find input { width: 200px; height: 30px; padding: 0 10px; border-radius: 8px; border: 1px solid var(--t-color-border-secondary, #d0d5dd); background: var(--t-color-background-primary, #fff); color: inherit; font: inherit; }
+    .pd9-tri-find input:focus { outline: none; border-color: #1f7a77; box-shadow: 0 0 0 3px rgba(31,122,119,.18); }
+    .pd9-tri-none { font-size: 12px; color: #b42318; white-space: nowrap; }
+    html.pd9-dark .pd9-tri-find input { background: #1b1f24; border-color: #3a414b; }
+    html.pd9-dark .pd9-tri-none { color: #f97066; }
+    .pd9-tri-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+    .pd9-tri-chips button { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 999px; border: 1px solid var(--t-color-border-secondary, #d0d5dd); background: var(--t-color-background-primary, #fff); }
+    .pd9-tri-chips button[aria-pressed="true"] { border-color: #1f7a77; background: #e7f3f2; color: #155e5b; font-weight: 600; }
+    .pd9-tri-n { color: var(--t-color-text-secondary, #667085); font-variant-numeric: tabular-nums; font-weight: 500; }
+    .pd9-tri-grow { flex: 1; }
+    .pd9-tri-select, .pd9-tri-bulk button { border: 1px solid var(--t-color-border-secondary, #d0d5dd); background: var(--t-color-background-primary, #fff); padding: 5px 12px; border-radius: 8px; font-weight: 600; }
+    .pd9-tri-bulk { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+    .pd9-tri-count { margin: 0 4px; font-weight: 600; color: #155e5b; }
+    .pd9-tri-flagbtn { display: inline-flex; align-items: center; gap: 6px; }
+    #pd9-triage .pd9-tri-done { background: #1f7a77; border-color: #1f7a77; color: #fff; }
+    #pd9-triage button:focus-visible { outline: 2px solid #1f7a77; outline-offset: 1px; }
+    .pd9-fdot { width: 10px; height: 10px; border-radius: 50%; background: #c4c9d2; flex: none; display: inline-block; }
+    .pd9-f-red { background: #d92d20; } .pd9-f-yellow { background: #eaaa08; } .pd9-f-green { background: #16a34a; }
+
+    ul.activity-group-list.pd9-tri-sorted { display: flex !important; flex-direction: column; }
+    li.activity-list-item.pd9-tri-hide { display: none !important; }
+    li.activity-list-item[data-pd9-flag="red"] .activity-item-component { box-shadow: inset 4px 0 0 #d92d20; }
+    li.activity-list-item[data-pd9-flag="yellow"] .activity-item-component { box-shadow: inset 4px 0 0 #eaaa08; }
+    li.activity-list-item[data-pd9-flag="green"] .activity-item-component { box-shadow: inset 4px 0 0 #16a34a; }
+    .pd9-flag-btn { display: grid; place-items: center; width: 34px; height: 34px; margin: 8px auto 0; padding: 0; border: 1px solid transparent; border-radius: 8px; background: none; color: #b0b6c1; cursor: pointer; }
+    .pd9-flag-btn:hover { background: rgba(16, 24, 40, .06); color: #667085; }
+    .pd9-flag-btn:focus-visible { outline: 2px solid #1f7a77; outline-offset: 1px; }
+    .pd9-flag-btn[data-flag="red"] { color: #d92d20; } .pd9-flag-btn[data-flag="yellow"] { color: #ca8a04; } .pd9-flag-btn[data-flag="green"] { color: #16a34a; }
+    .pd9-tri-pick { display: none; width: 18px; height: 18px; margin: 0 auto 8px; accent-color: #1f7a77; cursor: pointer; }
+    html.pd9-tri-selecting .pd9-tri-pick { display: block; }
+    .pd9-flag-menu { position: fixed; z-index: 100006; min-width: 220px; padding: 6px; border-radius: 10px; background: var(--t-color-background-menu, #fff); color: var(--t-color-text-primary, #1d2433);
+      box-shadow: 0 0 0 1px rgba(16, 24, 40, .1), 0 16px 40px -12px rgba(16, 24, 40, .4); font: 13px/1.3 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    .pd9-flag-menu button { display: grid; grid-template-columns: 14px auto 1fr auto; align-items: center; gap: 8px; width: 100%; padding: 8px 10px; border: 0; border-radius: 6px; background: none; text-align: left; cursor: pointer; font: inherit; color: inherit; }
+    .pd9-flag-menu button:hover, .pd9-flag-menu button:focus-visible { background: rgba(16, 24, 40, .06); outline: none; }
+    .pd9-flag-menu button span:not(.pd9-fdot) { color: var(--t-color-text-secondary, #667085); }
+    html.pd9-dark #pd9-triage { background: #191c22; border-color: #262b33; }
+    html.pd9-dark .pd9-tri-seg { background: rgba(255, 255, 255, .06); }
+    html.pd9-dark .pd9-tri-chips button[aria-pressed="true"] { background: #17302d; color: #7fe0d4; border-color: #2fbfae; }
+    html.pd9-dark .pd9-tri-count { color: #7fe0d4; }
+    /* ---------- Deposition recorder ---------- */
+    #pd9-depo { position: fixed; left: 20px; bottom: 20px; z-index: 2147483000; width: 380px; max-width: calc(100vw - 40px); background: #14171c; color: #e6e9ee; border: 1px solid #2a3039; border-radius: 14px; box-shadow: 0 18px 48px -12px rgba(0,0,0,.55); font: 13px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; overflow: hidden; }
+    #pd9-depo button { font: inherit; cursor: pointer; }
+    #pd9-depo [hidden] { display: none !important; }
+    .pd9-depo-head { display: flex; align-items: center; gap: 8px; padding: 10px 10px 10px 14px; border-bottom: 1px solid #232831; }
+    .pd9-depo-title { font-size: 13px; font-weight: 600; letter-spacing: .01em; }
+    .pd9-depo-grow { flex: 1; }
+    .pd9-depo-dot { width: 9px; height: 9px; border-radius: 50%; background: #4b5563; flex: none; }
+    #pd9-depo[data-state=recording] .pd9-depo-dot { background: #f04438; box-shadow: 0 0 0 0 rgba(240,68,56,.6); animation: pd9-depo-pulse 1.6s infinite; }
+    #pd9-depo[data-state=paused] .pd9-depo-dot { background: #fdb022; }
+    #pd9-depo[data-state=saved] .pd9-depo-dot { background: #32d583; }
+    #pd9-depo.pd9-depo-quiet .pd9-depo-dot { background: #fdb022; animation: none; }
+    @keyframes pd9-depo-pulse { 0% { box-shadow: 0 0 0 0 rgba(240,68,56,.55); } 70% { box-shadow: 0 0 0 8px rgba(240,68,56,0); } 100% { box-shadow: 0 0 0 0 rgba(240,68,56,0); } }
+    .pd9-depo-icon { width: 26px; height: 26px; border-radius: 7px; border: 0; background: transparent; color: #9aa4b2; font-size: 16px; line-height: 1; }
+    .pd9-depo-icon:hover { background: #222831; color: #fff; }
+    .pd9-depo-mini-meter, .pd9-depo-mini-time { display: none; }
+    .pd9-depo-body { padding: 12px 14px 14px; display: flex; flex-direction: column; gap: 10px; }
+    .pd9-depo-field { display: flex; flex-direction: column; gap: 4px; }
+    .pd9-depo-field > span { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: #8b95a3; }
+    .pd9-depo-field input, .pd9-depo-field select { height: 32px; padding: 0 10px; border-radius: 8px; border: 1px solid #2f3742; background: #0e1014; color: #e6e9ee; font: inherit; min-width: 0; }
+    .pd9-depo-field input:focus, .pd9-depo-field select:focus { outline: none; border-color: #2fbfae; box-shadow: 0 0 0 3px rgba(47,191,174,.2); }
+    .pd9-depo-field select:disabled { opacity: .6; }
+    .pd9-depo-saveas { font-size: 11.5px; color: #8b95a3; margin-top: -4px; overflow-wrap: anywhere; }
+    .pd9-depo-file { color: #c8ced8; font-family: ui-monospace, Consolas, monospace; font-size: 11px; }
+    .pd9-depo-wave { display: block; width: 100%; height: 64px; background: #0e1014; border-radius: 8px; }
+    .pd9-depo-meter { position: relative; height: 8px; border-radius: 4px; background: #232831; }
+    .pd9-depo-fill { position: absolute; inset: 0 auto 0 0; width: 0; overflow: hidden; border-radius: 4px; transition: width 60ms linear; }
+    .pd9-depo-grad { width: 352px; max-width: none; height: 100%; background: linear-gradient(90deg, #32d583 0%, #32d583 70%, #fdb022 82%, #f04438 95%); }
+    .pd9-depo-peak { position: absolute; top: -2px; bottom: -2px; width: 2px; margin-left: -1px; background: #e6e9ee; border-radius: 1px; opacity: .8; }
+    .pd9-depo-status { display: flex; align-items: center; gap: 12px; min-height: 30px; }
+    .pd9-depo-big { font: 600 22px/1 ui-monospace, Consolas, monospace; letter-spacing: .02em; font-variant-numeric: tabular-nums; }
+    .pd9-depo-msg { font-size: 12px; color: #9aa4b2; }
+    .pd9-depo-msg[data-kind=rec] { color: #fda29b; }
+    .pd9-depo-msg[data-kind=warn] { color: #fec84b; }
+    .pd9-depo-msg[data-kind=bad] { color: #f97066; }
+    .pd9-depo-msg[data-kind=ok] { color: #6ce9a6; }
+    .pd9-depo-btns { display: flex; flex-wrap: wrap; gap: 8px; }
+    .pd9-depo-btns button { height: 34px; padding: 0 14px; border-radius: 9px; border: 1px solid #2f3742; background: #1d2229; color: #e6e9ee; }
+    .pd9-depo-btns button:hover { background: #262c35; }
+    .pd9-depo-btns .pd9-depo-rec { display: inline-flex; align-items: center; gap: 8px; background: #d92d20; border-color: #d92d20; color: #fff; font-weight: 600; }
+    .pd9-depo-btns .pd9-depo-rec:hover { background: #b42318; }
+    .pd9-depo-recdot { width: 9px; height: 9px; border-radius: 50%; background: #fff; }
+    .pd9-depo-btns .pd9-depo-stop { background: #e6e9ee; border-color: #e6e9ee; color: #14171c; font-weight: 600; }
+    .pd9-depo-btns .pd9-depo-stop:hover { background: #fff; }
+    .pd9-depo-recover { padding: 10px 12px; border-radius: 10px; background: #2a1f0c; border: 1px solid #5c4413; color: #fde7b0; display: flex; flex-direction: column; gap: 6px; }
+    .pd9-depo-recover[hidden] { display: none; }
+    #pd9-depo.pd9-depo-mini { width: auto; }
+    #pd9-depo.pd9-depo-mini .pd9-depo-body { display: none; }
+    #pd9-depo.pd9-depo-mini .pd9-depo-head { border-bottom: 0; cursor: pointer; }
+    #pd9-depo.pd9-depo-mini .pd9-depo-title { display: none; }
+    #pd9-depo.pd9-depo-mini .pd9-depo-mini-meter { display: block; position: relative; width: 70px; height: 6px; border-radius: 3px; background: #232831; overflow: hidden; }
+    #pd9-depo.pd9-depo-mini .pd9-depo-mini-fill { position: absolute; inset: 0 auto 0 0; background: #32d583; border-radius: 3px; }
+    #pd9-depo.pd9-depo-mini .pd9-depo-mini-time { display: inline; font: 600 13px ui-monospace, Consolas, monospace; font-variant-numeric: tabular-nums; }
     .pd9-ver { margin-left: 4px; font-size: .85em; font-weight: 400; opacity: .5; }
     .fvqn-toast {
       position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
