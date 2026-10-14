@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PD9 Filevine Improver
 // @namespace    https://filevine.local/pd9-improver
-// @version      3.103.3
+// @version      3.105.1
 // @description  Faster notes, tasks, and case closing in Filevine for PD9.
 // @match        https://*.filevine.com/*
 // @match        https://*.filevineapp.com/*
@@ -198,42 +198,51 @@
   // {|} is where the cursor lands. Leave it out to land at the end.
   // "tag" is added as a hashtag at the bottom of the note, after 2 blank lines.
   // ---------------------------------------------------------------
+  // Client communication, the way the office wants it logged (October 2026):
+  // calls as a Call with #CLIENTCOMM; visits as a note with #CLIENTCOMM plus
+  // the kind of visit. File Review lives on the Intake tab and Conflict on the
+  // Request tab now, so they are not note templates anymore.
   const DEFAULT_TEMPLATES = [
     {
-      label: 'Contact', subject: 'Contact', tag: 'CONTACT', hotkey: 'C',
+      label: 'Client Call', subject: 'Client Call', type: 'call', tag: 'CLIENTCOMM', hotkey: 'C',
       body: [
-        'Date of contact: {date}',
-        'Contact type: {|}',
-        'Contact with: ',
+        'Date: {date}',
+        'Spoke with: {|}',
         'Discussed: ',
         'Follow-up: ',
       ].join('\n'),
     },
     {
-      label: 'File Review', subject: 'File Review', tag: 'FILEREVIEW', hotkey: 'Alt+2',
+      label: 'Jail Visit', subject: 'Jail Visit', type: 'note', tag: 'CLIENTCOMM JAILVISIT', hotkey: 'Alt+2',
       body: [
-        'Charge: {|}',
-        'Summary: ',
-        'Pending Cases: ',
-        'Jail: ',
-        'Conflict: ',
-        'Theory of Defense: ',
-        'Motions: ',
-        'Experts: ',
+        'Date: {date}',
+        'Discussed: {|}',
+        'Follow-up: ',
       ].join('\n'),
     },
     {
-      label: 'Conflict', subject: 'Conflict', tag: 'CONFLICT', hotkey: 'Alt+3',
+      label: 'Video Visit', subject: 'Video Visit', type: 'note', tag: 'CLIENTCOMM VIDEO', hotkey: 'Alt+3',
       body: [
-        '(1) Nature of conflict: {|}',
-        '(2) Open cases: ',
-        '(3) Prior representation: ',
-        '(4) If co-d, who is more culpable: ',
-        '(5) If co-d, are either incarcerated: ',
-        '(6) Recommendation for conflict and why? ',
+        'Date: {date}',
+        'Discussed: {|}',
+        'Follow-up: ',
+      ].join('\n'),
+    },
+    {
+      label: 'Court', subject: 'Court', type: 'note', tag: 'CLIENTCOMM COURT', hotkey: 'Alt+4',
+      body: [
+        'Date: {date}',
+        'Discussed: {|}',
+        'Follow-up: ',
       ].join('\n'),
     },
   ];
+  // The old defaults, to tell untouched copies (safe to replace) from ones people changed.
+  const OLD_DEFAULT_BODIES = {
+    Contact: 'Date of contact: {date}\nContact type: {|}\nContact with: \nDiscussed: \nFollow-up: ',
+    'File Review': 'Charge: {|}\nSummary: \nPending Cases: \nJail: \nConflict: \nTheory of Defense: \nMotions: \nExperts: ',
+    Conflict: '(1) Nature of conflict: {|}\n(2) Open cases: \n(3) Prior representation: \n(4) If co-d, who is more culpable: \n(5) If co-d, are either incarcerated: \n(6) Recommendation for conflict and why? ',
+  };
 
   // ---------- saved settings (per person, kept by Tampermonkey) ----------
   const store = {
@@ -248,12 +257,28 @@
   };
   const TEMPLATES_KEY = 'pd9-templates';
   const newId = () => `t${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
-  const cleanTag = (t) => (t || '').trim().replace(/^#+/, '').replace(/\s+/g, '');
+  // One or more tags, written like "CLIENTCOMM JAILVISIT" (spaces, commas or # between).
+  const cleanTag = (t) => (t || '').split(/[\s,#]+/).filter(Boolean).join(' ');
+  const tagList = (t) => cleanTag(t).split(' ').filter(Boolean);
 
   function loadTemplates() {
-    const saved = store.get(TEMPLATES_KEY, null);
+    let saved = store.get(TEMPLATES_KEY, null);
+    // One time (October 2026): swap the old Contact / File Review / Conflict
+    // templates for the client communication ones. Templates someone changed stay.
+    if (Array.isArray(saved) && saved.length && !store.get('pd9-templates-oct2026', false)) {
+      const kept = saved.filter((t) => !(OLD_DEFAULT_BODIES[t.label] !== undefined && (t.body || '') === OLD_DEFAULT_BODIES[t.label]));
+      const taken = new Set(kept.map((t) => t.hotkey).filter(Boolean));
+      for (const d of DEFAULT_TEMPLATES) {
+        if (kept.some((t) => t.label === d.label)) continue;
+        kept.push({ ...d, hotkey: taken.has(d.hotkey) ? '' : d.hotkey });
+        if (d.hotkey) taken.add(d.hotkey);
+      }
+      saved = kept;
+      store.set(TEMPLATES_KEY, saved);
+      store.set('pd9-templates-oct2026', true);
+    }
     const list = Array.isArray(saved) && saved.length ? saved : DEFAULT_TEMPLATES;
-    return list.map((t) => ({ id: t.id || newId(), label: t.label || 'Untitled', subject: t.subject || '', tag: cleanTag(t.tag), body: t.body || '', hotkey: t.hotkey || '' }));
+    return list.map((t) => ({ id: t.id || newId(), label: t.label || 'Untitled', subject: t.subject || '', type: t.type === 'call' ? 'call' : 'note', tag: cleanTag(t.tag), body: t.body || '', hotkey: t.hotkey || '' }));
   }
   let TEMPLATES = loadTemplates();
 
@@ -503,7 +528,7 @@
 
   // Make sure "Note" is the selected activity type.
   // Activity types in the composer header, by their icon name.
-  const TYPE_ICONS = { note: 'sticky_note_2', task: 'notes' };
+  const TYPE_ICONS = { note: 'sticky_note_2', task: 'notes', call: 'phone' };
 
   // Select a type (note or task). Returns true if it had to switch.
   function ensureType(form, type) {
@@ -621,7 +646,7 @@
 
 
   // ---------- clear old template tags from the Tags box ----------
-  const templateTags = () => [...new Set(TEMPLATES.map((t) => t.tag).filter(Boolean))];
+  const templateTags = () => [...new Set(TEMPLATES.flatMap((t) => tagList(t.tag)))];
 
   // Remove chips for template tags other than "keep" (for example, CONFLICT
   // when you switch to a Contact template). Tags you add by hand stay.
@@ -629,7 +654,7 @@
     for (let pass = 0; pass < 5; pass++) {
       const extra = $$(SEL.tagChip, form).filter((chip) => {
         const name = norm(chip.getAttribute('data-testid').slice('tag-chip-'.length));
-        return name !== norm(keep) && templateTags().some((t) => norm(t) === name);
+        return !tagList(keep).some((k) => norm(k) === name) && templateTags().some((t) => norm(t) === name);
       });
       if (!extra.length) return;
       for (const chip of extra) {
@@ -754,7 +779,15 @@
 
     // Two blank lines, then the hashtag. The space after it closes the tag
     // suggestion list. Then the cursor jumps back to the {|} spot.
-    const body = tpl.tag ? `${tpl.body}\n\n\n#${tpl.tag.replace(/^#/, '')} ` : tpl.body;
+    const tags = tagList(tpl.tag);
+    const body = tags.length ? `${tpl.body}\n\n\n${tags.map((t) => `#${t}`).join(' ')} ` : tpl.body;
+
+    // Calls are logged as a Call (the phone icon), everything else as a Note.
+    const want = tpl.type === 'call' ? 'call' : 'note';
+    if (!$(SEL.taskFields, form) && ensureType(form, want)) {
+      await sleep(400); // switching type redraws the form
+      await waitFor(() => $(SEL.message, form), 1500);
+    }
 
     await clearOtherTemplateTags(form, tpl.tag);
     const subj = $(SEL.subject, form);
@@ -804,7 +837,7 @@
     }
     const hint = document.createElement('span');
     hint.className = 'fvqn-hint';
-    hint.textContent = 'N: note   T: task   C: contact   Ctrl+Enter: save';
+    hint.textContent = 'N: note   T: task   C: client call   Ctrl+Enter: save';
     bar.appendChild(hint);
     wrap.appendChild(bar);
     return wrap;
@@ -854,8 +887,12 @@
   // Newest first. "v" is the Improver version that brought it; "staff" is the Staff
   // version. Leave one out to hide the item from that script.
   const WHATS_NEW = [
-    // October 13, 2026 (one list, so everyone sees all of today's changes together)
-    { v: '3.103.1', items: [
+    // One list for everything new (October 13 and 14, 2026), so everyone sees it all together.
+    { v: '3.105.1', items: [
+      'Intake tab: a Today button next to Today\u2019s Date, and a File Review template button next to Incident Details.',
+      'Request tab: a Today button next to Date Requested, Requestor fills in with your name when you pick a Request Type (or click Me), and a Conflict template button appears next to Comment when the type is CONFLICT.',
+      'New client contact templates that follow the office rules: Client Call (logs it as a Call with #CLIENTCOMM, shortcut C), Jail Visit (#CLIENTCOMM #JAILVISIT), Video Visit (#CLIENTCOMM #VIDEO) and Court (#CLIENTCOMM #COURT).',
+      'The old Contact, File Review and Conflict note templates are gone (File Review goes on the Intake tab and Conflict on the Request tab now). If you changed one of them yourself, yours is kept.',
       'Benchmark button on Osceola cases. It searches the Clerk’s site for the Court Case Number on Case Summary and opens the case. If you are not logged in to Benchmark, it asks you to log in first.',
       'Record Depo button on every case. It shows the sound level while it records, and the audio file (case name, date and time) downloads when you stop. A backup keeps it safe if Chrome crashes.',
       'Search box above a case’s Activity feed. Type words or a date like 10/2 to show only matching items. Click "Search older items" to include older activity.',
@@ -885,7 +922,7 @@
     const fresh = groups.filter((g) => versionNum(g[key]) > since);
     // After an update with nothing new to list (a small fix), show nothing.
     if (sinceVersion && !fresh.length) return [];
-    return (fresh.length ? fresh : groups).flatMap((g) => g.items).slice(0, 8);
+    return (fresh.length ? fresh : groups).flatMap((g) => g.items).slice(0, 12);
   }
 
   function showWhatsNew(items, fromMenu) {
@@ -1024,10 +1061,11 @@
           <div class="pd9-form">
             <label>Button name<input type="text" name="label" maxlength="40"></label>
             <label>Subject<input type="text" name="subject" maxlength="200"></label>
-            <label>Tag<span class="pd9-tagwrap"><span>#</span><input type="text" name="tag" maxlength="60" placeholder="CONTACT"></span></label>
+            <label>Type<select name="type"><option value="note">Note</option><option value="call">Call (phone icon)</option></select></label>
+            <label>Tags<span class="pd9-tagwrap"><span>#</span><input type="text" name="tag" maxlength="120" placeholder="CLIENTCOMM JAILVISIT"></span></label>
             <label>Shortcut<span class="pd9-tagwrap"><input type="text" name="hotkey" readonly placeholder="Click here, then press keys (like Alt+4)"><button type="button" class="pd9-btn pd9-hk-clear">Clear</button></span></label>
             <label>Note text<textarea name="body" rows="10"></textarea></label>
-            <p class="pd9-help">Type <code>{date}</code> for today's date and <code>{|}</code> where the cursor should start. Leave Tag empty for no tag. A shortcut starts a note with this template from anywhere in a case.</p>
+            <p class="pd9-help">Type <code>{date}</code> for today's date and <code>{|}</code> where the cursor should start. Put a space between tags. Leave Tags empty for no tag. A shortcut starts a note with this template from anywhere in a case.</p>
             <div class="pd9-row">
               <button type="button" class="pd9-btn pd9-up" title="Move up">Move up</button>
               <button type="button" class="pd9-btn pd9-down" title="Move down">Move down</button>
@@ -1062,7 +1100,7 @@
       toast(zoomSel.value === 'auto' ? `Case windows: Auto (${Math.round(winZoom() * 100)}% on this screen)` : `Case windows: ${zoomSel.selectedOptions[0].textContent}`);
     });
     const ul = q('.pd9-list');
-    const f = { label: q('[name=label]'), subject: q('[name=subject]'), tag: q('[name=tag]'), body: q('[name=body]') };
+    const f = { label: q('[name=label]'), subject: q('[name=subject]'), type: q('[name=type]'), tag: q('[name=tag]'), body: q('[name=body]') };
     const hk = q('[name=hotkey]');
     hk.addEventListener('keydown', (e) => {
       if (e.key === 'Tab' || e.key === 'Escape') return;
@@ -1092,14 +1130,14 @@
       }
     }
     function drawForm() {
-      const t = list[sel] || { label: '', subject: '', tag: '', body: '', hotkey: '' };
-      f.label.value = t.label; f.subject.value = t.subject; f.tag.value = t.tag; f.body.value = t.body;
+      const t = list[sel] || { label: '', subject: '', type: 'note', tag: '', body: '', hotkey: '' };
+      f.label.value = t.label; f.subject.value = t.subject; f.type.value = t.type === 'call' ? 'call' : 'note'; f.tag.value = t.tag; f.body.value = t.body;
       hk.value = t.hotkey || ''; hk.disabled = !list[sel];
     }
     function redraw() { drawList(); drawForm(); }
 
     for (const [key, el] of Object.entries(f)) {
-      el.addEventListener('input', () => {
+      el.addEventListener(el.tagName === 'SELECT' ? 'change' : 'input', () => {
         if (!list[sel]) return;
         list[sel][key] = key === 'tag' ? cleanTag(el.value) : el.value;
         dirty = true;
@@ -1114,7 +1152,7 @@
       if (e.key === 'Enter' || e.key === ' ') { const li = e.target.closest('li[data-i]'); if (li) { e.preventDefault(); sel = +li.dataset.i; redraw(); } }
     });
     q('.pd9-add').addEventListener('click', () => {
-      list.push({ id: newId(), label: 'New template', subject: '', tag: '', body: '', hotkey: '' });
+      list.push({ id: newId(), label: 'New template', subject: '', type: 'note', tag: '', body: '', hotkey: '' });
       sel = list.length - 1; dirty = true; redraw(); f.label.select();
     });
     q('.pd9-del').addEventListener('click', () => {
@@ -1166,7 +1204,7 @@
         let added = 0, skipped = 0;
         for (const raw of items.slice(0, 100)) {
           const t = { id: newId(), label: text(raw && raw.label, 40).trim(), subject: text(raw && raw.subject, 200),
-            tag: cleanTag(text(raw && raw.tag, 60)), body: text(raw && raw.body, 20000), hotkey: '' };
+            type: raw && raw.type === 'call' ? 'call' : 'note', tag: cleanTag(text(raw && raw.tag, 120)), body: text(raw && raw.body, 20000), hotkey: '' };
           if (!t.label) { skipped++; continue; }
           if (list.some((x) => same(x, t))) { skipped++; continue; }
           const hkIn = text(raw && raw.hotkey, 20);
@@ -5102,7 +5140,7 @@
         const text = tpl.body.replace(/\{date\}/g, new Date().toLocaleDateString());
         const at = text.indexOf('{|}');
         body.value = text.replace('{|}', '');
-        if (tpl.tag) addTag(tpl.tag);
+        tagList(tpl.tag).forEach((t) => addTag(t));
         body.focus();
         body.setSelectionRange(at < 0 ? body.value.length : at, at < 0 ? body.value.length : at);
       });
@@ -6275,6 +6313,157 @@
     if (ff.query && ffItems().length !== ff.seen) ffApply();
   }
 
+  // ---------- Intake and Request tabs: small helpers ----------
+  //  - "Today" next to Today's Date (Intake) and Date Requested (Request).
+  //  - "File Review" template next to Incident Details (Intake).
+  //  - "Conflict" template next to Comment, once Request Type is CONFLICT (Request).
+  //  - Requestor fills in with you (the person signed in to Filevine).
+  // These only type into the form like you would. Nothing saves until you click Save.
+  const FORM_TEMPLATES = {
+    'File Review': OLD_DEFAULT_BODIES['File Review'],
+    Conflict: OLD_DEFAULT_BODIES.Conflict,
+  };
+  // If you kept your own copy of the template in Improver Options, use yours.
+  const formTemplate = (label) => {
+    const mine = TEMPLATES.find((t) => t.label.trim().toLowerCase() === label.toLowerCase());
+    return (mine && mine.body) || FORM_TEMPLATES[label] || '';
+  };
+  const fieldInForm = (root, prefix, tag = '') => $(`${tag}[name^="${prefix}"]`, root);
+  const labelRowOf = (el) => {
+    const field = el && el.closest('.custom-field');
+    const label = field && field.querySelector('field-label');
+    return label && label.parentElement;
+  };
+  function addFieldButton(row, cls, text, title, onClick) {
+    if (!row || row.querySelector(`.${cls}`)) return row && row.querySelector(`.${cls}`);
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = `pd9-field-btn ${cls}`;
+    b.textContent = text;
+    b.title = title;
+    b.addEventListener('mousedown', (e) => e.preventDefault());
+    b.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); onClick(b); });
+    row.appendChild(b);
+    return b;
+  }
+
+  // Type a date the way Filevine's date box accepts it: type, then click away.
+  function typeDate(input, value) {
+    input.focus();
+    input.select();
+    document.execCommand('insertText', false, value);
+    if (input.value !== value) setInputValue(input, value);
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+    input.blur();
+  }
+
+  // Put a template in a text box, cursor at the {|} spot.
+  function fillTextArea(area, body) {
+    if (area.value.trim() && !confirm('Replace what is already in this box?')) return;
+    const text = body.replace(/\{date\}/g, dueDateString(0));
+    const at = text.indexOf('{|}');
+    const clean = text.replace('{|}', '');
+    area.focus();
+    area.select();
+    document.execCommand('insertText', false, clean);
+    if (area.value !== clean) {
+      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set.call(area, clean);
+      area.dispatchEvent(new Event('input', { bubbles: true }));
+    }
+    area.dispatchEvent(new Event('change', { bubbles: true }));
+    const pos = at < 0 ? clean.length : at;
+    area.setSelectionRange(pos, pos);
+  }
+
+  // The person signed in to Filevine (from the avatar at the top right).
+  const myName = () => {
+    const a = $('.global-avatar-menu-trigger-content [aria-label], [data-testid="chat-container"][data-testid-name]');
+    return ((a && (a.getAttribute('aria-label') || a.getAttribute('data-testid-name'))) || '').trim();
+  };
+
+  // Pick you in a person box (Filevine's contact search). Typing triggers the
+  // search; then click the match. Gives up quietly if there is no clear match.
+  const filledPerson = new WeakSet();
+  async function fillPersonWithMe(field, quiet) {
+    const name = myName();
+    const input = field && $('input.person-input', field);
+    if (!name || !input || !isVisible(input)) { if (!quiet) toast('Could not find your name or the Requestor box.'); return; }
+    const words = name.toLowerCase().split(/\s+/).filter(Boolean);
+    input.focus();
+    setInputValue(input, '');
+    for (const ch of name) {
+      document.execCommand('insertText', false, ch);
+      await sleep(25);
+    }
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    const pick = await waitFor(() => {
+      const items = $$('ul.person-list li, ul.dropdown-menu li', field).filter((li) => isVisible(li));
+      const hits = items.filter((li) => { const t = li.textContent.toLowerCase(); return words.every((w) => t.includes(w)); });
+      return hits.length ? hits[0] : null;
+    }, 4000);
+    if (!pick) { if (!quiet) toast(`Could not find "${name}" in the Requestor list. Pick it by hand.`); return; }
+    (pick.querySelector('a') || pick).dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+    (pick.querySelector('a') || pick).click();
+  }
+
+  function addFormHelpers() {
+    for (const form of $$('form.project-item-edit-form')) {
+      // Today buttons
+      for (const prefix of ['todaysdate', 'daterequested']) {
+        const input = fieldInForm(form, prefix, 'input');
+        if (!input || input.tagName !== 'INPUT' || input.readOnly) continue;
+        addFieldButton(labelRowOf(input), 'pd9-today-btn', 'Today', 'Fill in today’s date', () => {
+          const live = fieldInForm(form, prefix, 'input');
+          if (live) typeDate(live, dueDateString(0));
+        });
+      }
+      // File Review template (Intake)
+      const incident = fieldInForm(form, 'incidentdetails', 'textarea');
+      if (incident && incident.tagName === 'TEXTAREA') {
+        addFieldButton(labelRowOf(incident), 'pd9-fr-btn', 'File Review template', 'Fill this box with the File Review template', () => {
+          const live = fieldInForm(form, 'incidentdetails', 'textarea');
+          if (live) fillTextArea(live, formTemplate('File Review'));
+        });
+      }
+      // Conflict template (Request), only when Request Type is CONFLICT
+      const type = fieldInForm(form, 'requesttype', 'select');
+      const comment = fieldInForm(form, 'comment', 'textarea');
+      // Picking a Request Type doesn't change the page layout, so watch it directly.
+      if (type && !type._pd9Redraw) {
+        type._pd9Redraw = true;
+        type.addEventListener('change', () => setTimeout(addFormHelpers, 50));
+      }
+      if (type && comment && comment.tagName === 'TEXTAREA') {
+        const isConflict = /conflict/i.test(type.value || (type.selectedOptions && type.selectedOptions[0] && type.selectedOptions[0].textContent) || '');
+        const row = labelRowOf(comment);
+        const btn = row && row.querySelector('.pd9-cf-btn');
+        if (isConflict && !btn) {
+          addFieldButton(row, 'pd9-cf-btn', 'Conflict template', 'Fill the comment with the Conflict template', () => {
+            const live = fieldInForm(form, 'comment', 'textarea');
+            if (live) fillTextArea(live, formTemplate('Conflict'));
+          });
+        } else if (!isConflict && btn) btn.remove();
+      }
+      // Requestor: a "Me" button, and filled in by itself when you pick a Request Type.
+      const requestor = $('[name^="requestor"]', form);
+      if (requestor && type) {
+        const row = labelRowOf(requestor);
+        addFieldButton(row, 'pd9-me-btn', 'Me', 'Fill in your name', () => fillPersonWithMe(requestor, false));
+        if (!type._pd9Watch) {
+          type._pd9Watch = true;
+          type.addEventListener('change', () => {
+            const pi = $('.person-input', requestor);
+            const empty = pi && isVisible(pi) && !pi.value.trim();
+            if (empty && !filledPerson.has(requestor)) {
+              filledPerson.add(requestor);
+              setTimeout(() => fillPersonWithMe(requestor, true), 300);
+            }
+          });
+        }
+      }
+    }
+  }
+
   function decorate() {
     watchProject();
     addOptionsMenuItem();
@@ -6298,6 +6487,7 @@
     addDepoButton();
     if (!STAFF) addSwitchButton();
     addDocPreview();
+    addFormHelpers();
     addFeedSearch();
     for (const form of $$(COMPOSERS)) {
       const layout = $(SEL.layout, form);
@@ -6477,12 +6667,12 @@
       const combo = comboFromEvent(e);
       // C is built in for a contact note: if no template claims C, use the Contact template.
       const tpl = combo && (TEMPLATES.find((t) => t.hotkey === combo) ||
-        (combo === 'C' && TEMPLATES.find((t) => norm(t.tag) === 'contact' || /^contact$/i.test(t.label.trim()))));
+        (combo === 'C' && TEMPLATES.find((t) => /^client call$/i.test(t.label.trim()) || /^contact$/i.test(t.label.trim()))));
       if (tpl) {
         if (!inCase() || isTyping(e) || document.querySelector('.pd9-overlay')) return;
         e.preventDefault();
         e.stopImmediatePropagation();
-        openFloating('note').then((form) => { if (form) useTemplate(form, tpl); });
+        openFloating(tpl.type === 'call' ? 'call' : 'note').then((form) => { if (form) useTemplate(form, tpl); });
         return;
       }
     }
@@ -7314,6 +7504,11 @@
     html.pd9-dark .pd9-ff-more:hover { background: #17302d; }
     html.pd9-dark .pd9-ff-count[data-none="true"] { color: #f97066; }
     html.pd9-dark ::highlight(pd9-ff) { background-color: #8a6d12; color: #fff; }
+    /* ---------- Intake / Request helper buttons ---------- */
+    .pd9-field-btn { margin-left: 8px; padding: 1px 8px; height: 22px; border-radius: 6px; border: 1px solid var(--t-color-border, #c9ced6); background: var(--t-color-background-primary, #fff); color: #1f7a77; font: inherit; font-size: 12px; font-weight: 600; cursor: pointer; align-self: center; white-space: nowrap; }
+    .pd9-field-btn:hover { background: #e7f3f2; border-color: #1f7a77; }
+    html.pd9-dark .pd9-field-btn { background: #1b1f24; border-color: #3a414b; color: #5fd4c4; }
+    html.pd9-dark .pd9-field-btn:hover { background: #17302d; }
     /* ---------- What's new card ---------- */
     #pd9-whatsnew { position: fixed; left: 20px; bottom: 20px; z-index: 2147483001; width: 340px; max-width: calc(100vw - 40px); padding: 12px 14px 10px; border-radius: 12px;
       background: #fff; color: #1d2433; border: 1px solid #e4e7ec; box-shadow: 0 12px 32px -12px rgba(16,24,40,.28); font: 13px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
