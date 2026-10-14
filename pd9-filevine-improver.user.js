@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PD9 Filevine Improver
 // @namespace    https://filevine.local/pd9-improver
-// @version      3.102.10
+// @version      3.102.11
 // @description  Faster notes, tasks, and case closing in Filevine for PD9.
 // @match        https://*.filevine.com/*
 // @match        https://*.filevineapp.com/*
@@ -188,7 +188,6 @@
   }
 
 
-
   // ---------------------------------------------------------------
   // DEFAULT TEMPLATES. Everyone starts with these. Each person can change
   // their own copy from the account menu: click your initials, then
@@ -276,7 +275,6 @@
   }
 
 
-
   // Hotkeys (no modifiers, only inside a case, never while typing)
   const HOTKEYS = {
     n: 'note',  // N opens the floating box as a Note
@@ -346,12 +344,6 @@
   function today() {
     const d = new Date();
     return `${d.getMonth() + 1}/${d.getDate()}/${d.getFullYear()}`;
-  }
-
-  function plainText(el) {
-    const c = el.cloneNode(true);
-    c.querySelectorAll('i, .visually-hidden').forEach((n) => n.remove());
-    return c.textContent.trim();
   }
 
   // True when the user is typing somewhere, so the hotkey stays out of the way.
@@ -1508,12 +1500,6 @@
     return out.replace(/\s+/g, ' ').trim();
   }
 
-  const textFitsCaseQuery = (text, input) => {
-    const qs = readCaseQuery(input);
-    return qs.length > 0 && readCaseNumbers(text).some((c) => qs.some((q) => caseFits(q, c)));
-  };
-
-
 
   // ---------- Case # Search: filtering Filevine's dropdown ----------
   // While a Case # Search is showing, hide dropdown results whose title doesn't
@@ -1598,22 +1584,6 @@
     return `\`${phrase(q.year)} | ${phrase(fullYear)}`;
   }
 
-
-
-
-
-
-  // Type the Case# search into Filevine's own search box (top of the page) and
-  // show only results whose TITLE has the right case number.
-  function startCaseSearch(entry) {
-    const qs = readCaseQuery(entry);
-    if (!qs.length) { toast('Type a case number like 241234, 24cf1234, or 24-CF-001234-A-OS.'); return false; }
-    const input = searchInput();
-    if (!input) { toast('Could not find the search box.'); return false; }
-    const query = caseSearchTerms(qs);
-    runCaseSearch(input, query, entry);
-    return true;
-  }
 
   // Tick Include Archived BEFORE typing, so Filevine runs one search (archived
   // included) instead of two: a normal one, then a second when the box gets
@@ -1719,7 +1689,6 @@
     host.after(caseBtn);
     caseBtn.after(nameBtn);
   }
-
 
 
   const SEARCH_MODES = {
@@ -1955,7 +1924,6 @@
       out.appendChild(more);
     }
   }
-
 
 
   // ---------- Advanced Name Search (a window that stays open between pages) ----------
@@ -3737,7 +3705,6 @@
   // Your own pins, kept by Tampermonkey. Pinned cases stay at the top of the table.
   const PIN_KEY = 'pd9-hub-pins';
   const pinSet = () => new Set((store.get(PIN_KEY, []) || []).map(String));
-  const isPinned = (id) => pinSet().has(String(id));
   function togglePin(id) {
     const pins = pinSet();
     if (pins.has(String(id))) pins.delete(String(id)); else pins.add(String(id));
@@ -3960,7 +3927,6 @@
     document.addEventListener('pointerdown', away, true);
     document.addEventListener('keydown', esc, true);
   }
-
 
 
   function cellFor(key, r, td) {
@@ -4622,7 +4588,6 @@
     const ov = document.getElementById('pd9-hub-sorted');
     if (ov) drawOwnTable(ov); else showOwnTable(true);
   }
-
 
 
   const CASE_TAB = 'pd9-case-tab';
