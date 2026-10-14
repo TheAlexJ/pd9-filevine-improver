@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PD9 Filevine Improver
 // @namespace    https://filevine.local/pd9-improver
-// @version      3.100.3
+// @version      3.102.10
 // @description  Faster notes, tasks, and case closing in Filevine for PD9.
 // @match        https://*.filevine.com/*
 // @match        https://*.filevineapp.com/*
@@ -35,35 +35,49 @@
   // ---------- Osceola Clerk (Benchmark): run a case number search ----------
   // The "Benchmark" button on an Osceola case opens the Clerk's search page with
   // the case number in the link (#pd9case=2026 CF 003344). Here, on the Clerk's
-  // site, the script picks "Case Number", types it in and presses Search, the
-  // same as a person would. It never fills in a captcha. If one shows, you finish it.
+  // site, the script picks "Case Number", types it in and presses Search once.
+  // It never touches a captcha, and it never searches a second time.
   const BENCHMARK_PENDING = 'pd9-benchmark-pending';
   if (location.hostname === 'courts.osceolaclerk.com') {
-    // A page with the search box is the search page, even when its address is the
-    // search's own address (the Clerk's site shows the form again when it refuses).
-    const onSearchPage = !!(document.getElementById('caseNumber') && document.getElementById('searchButton'));
+    // The Clerk's site replaces Date.now() with one that returns a date object,
+    // so get the time a way it can't change.
+    const now = () => new Date().getTime();
+    // Only the main search page runs the search. Results and case pages can have a
+    // search box too, so going by the box alone made it search a second time.
+    const onSearchPage = /\/Home\.aspx\/Search/i.test(location.pathname)
+      && !!(document.getElementById('caseNumber') && document.getElementById('searchButton'));
     const fromHash = decodeURIComponent((location.hash.match(/pd9case=([^&]+)/) || [])[1] || '');
-    const getPending = () => { try { return GM_getValue(BENCHMARK_PENDING, null); } catch (e) { return null; } };
-    const setPending = (v) => { try { GM_setValue(BENCHMARK_PENDING, v); } catch (e) { /* storage is optional */ } };
-    if (fromHash) setPending({ caseNo: fromHash, at: Date.now(), tries: 0 });
+    // The search waiting to run is kept in this tab only (sessionStorage). It is
+    // saved right away and other Benchmark tabs never see it, so a search can't
+    // run twice or start in a different tab.
+    const getPending = () => { try { return JSON.parse(sessionStorage.getItem(BENCHMARK_PENDING) || 'null'); } catch (e) { return null; } };
+    const setPending = (v) => { try { if (v) sessionStorage.setItem(BENCHMARK_PENDING, JSON.stringify(v)); else sessionStorage.removeItem(BENCHMARK_PENDING); } catch (e) { /* storage is optional */ } };
+    if (fromHash) setPending({ caseNo: fromHash, at: now(), tries: 0 });
     let pending = getPending();
-    if (pending && Date.now() - pending.at > 10 * 60000) { setPending(null); pending = null; }
+    if (pending && now() - pending.at > 10 * 60000) { setPending(null); pending = null; }
     // Logged in pages have a Logout button at the top right.
     const loggedIn = !!document.getElementById('btnLogout')
       || [...document.querySelectorAll('a, button')].some((el) => el.offsetParent && !el.closest('.modal, [id^="sessionTimeout"]') && /^\s*log\s*out\s*$/i.test(el.textContent || ''));
     if (!onSearchPage) {
       if (!pending) return;
+      // Results or a case page after the search ran: done for good. This check comes
+      // first. (It used to come after the login check below, so after logging in, the
+      // case page sent you back to search and it searched twice.)
+      if (pending.tries) { setPending(null); return; }
       // Just logged in and landed somewhere else: go back to the search page to finish.
       if (pending.needLogin && loggedIn) {
-        setPending({ ...pending, needLogin: false, at: Date.now() });
+        setPending({ ...pending, needLogin: false, at: now() });
         location.href = `${location.origin}/BenchmarkWeb/Home.aspx/Search`;
         return;
       }
-      // Results or a case page means the search went through.
+      // Results or a case page means the search went through. Stop here for good.
       if (pending.tries) setPending(null);
       return;
     }
     if (!pending) return;
+    // Back on the search page after the search already ran: never search again.
+    // If it bounced straight back (a refused search), fill the box and let you click.
+    if (pending.tries && now() - pending.at > 20000) { setPending(null); return; }
     const caseNo = pending.caseNo;
     const pageWin = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
     const note = (text, stay) => {
@@ -105,23 +119,28 @@
     // invisible captcha check. Pressing Search before that is ready makes the
     // Clerk's site throw the search away and show a blank search page.
     const ready = () => new Promise((resolve) => {
-      const started = Date.now();
+      const started = now();
       const check = () => {
         const loaded = document.readyState === 'complete';
         const rc = pageWin.grecaptcha;
         const rcReady = !!(rc && (typeof rc.execute === 'function' || typeof rc.render === 'function'));
         const hasRc = !!document.querySelector('script[src*="recaptcha"], iframe[src*="recaptcha"]');
-        if (loaded && (rcReady || !hasRc || Date.now() - started > 8000)) resolve();
+        if (loaded && (rcReady || !hasRc || now() - started > 8000)) resolve();
         else setTimeout(check, 200);
       };
       check();
     });
     const go = async () => {
+      // One search per page, even if both the Improver and the Staff script are
+      // installed (they share this page, so the first one to start takes it).
+      const root = document.documentElement;
+      if (root.dataset.pd9Benchmark) return;
+      root.dataset.pd9Benchmark = EDITION;
       if (fromHash) history.replaceState(null, '', location.pathname + location.search);
       // Not logged in: searching now would fail or ask for a captcha. Ask to log in;
       // the search runs by itself when you come back logged in (within 10 minutes).
       if (!loggedIn) {
-        setPending({ ...pending, needLogin: true, at: Date.now() });
+        setPending({ ...pending, needLogin: true, at: now() });
         const login = [...document.querySelectorAll('a, button')].find((el) => /^\s*(log\s*in|sign\s*in)\b/i.test(el.textContent || '') && el.offsetParent);
         note(`You are not logged in to Benchmark. Log in, and the search for ${caseNo} runs by itself after.`, true);
         const n = document.getElementById('pd9-bm-note');
@@ -140,22 +159,27 @@
       const why = [...document.querySelectorAll('.toast-message, .alert-error, .alert-danger, .alert, .validation-summary-errors, .field-validation-error, .error')]
         .map((e) => e.textContent.trim()).filter((t) => t && t.length < 300)[0] || '';
       // Second time back on a blank search page: stop trying, leave it filled in.
-      if (pending.tries >= 2) {
+      if (pending.tries >= 1) {
         setPending(null);
         let n = 0;
         const waitFill = () => { if (!fill() && (n += 1) < 40) setTimeout(waitFill, 250); };
         waitFill();
-        note(`The Clerk's site would not take the automatic search${why ? ` (it said: "${why}")` : ''}. ${caseNo} is filled in. Click Search.`, true);
+        const from = (document.referrer.match(/BenchmarkWeb\/([^?#]*)/) || [])[1] || '';
+        note(`The Clerk's site sent you back to the search page${why ? ` (it said: "${why}")` : ''}${from ? ` from ${from}` : ''}. ${caseNo} is filled in. Click Search.`, true);
         return;
       }
-      note(`Getting ready to search for ${caseNo}...`, true);
       await ready();
-      await new Promise((r) => setTimeout(r, 1200 + pending.tries * 2000));
+      // The Clerk's page points its search form at the right address one second
+      // after it loads, so wait a bit longer than that before pressing Search.
+      await new Promise((r) => setTimeout(r, 1300));
       if (!fill()) { note(`Could not find the case number box. Search for ${caseNo} by hand.`, true); setPending(null); return; }
       if (captchaShowing()) { setPending(null); note(`${caseNo} is filled in. Finish the captcha, then click Search.`, true); return; }
-      setPending({ ...pending, tries: pending.tries + 1, at: Date.now() });
+      if (root.dataset.pd9Benchmark !== EDITION) return;
+      // Press Search once. Mark it first, so if the Clerk's site ever sends us
+      // straight back here, we only fill the box and never search a second time.
       const btn = document.getElementById('searchButton');
-      if (!btn) { note(`${caseNo} is filled in. Click Search.`, true); setPending(null); return; }
+      if (!btn) { setPending(null); note(`${caseNo} is filled in. Press Enter or click Search.`, true); return; }
+      setPending({ ...pending, tries: 1, needLogin: false, at: now() });
       btn.click();
       note(`Searching for ${caseNo}...`);
     };
@@ -832,6 +856,83 @@
     }
   }
 
+  // ---------- What's new ----------
+  // After an update, a small card shows the new features once, in the corner.
+  // No dark backdrop, nothing to click through. It also opens from Improver Options.
+  // Newest first. "v" is the Improver version that brought it; "staff" is the Staff
+  // version. Leave one out to hide the item from that script.
+  const WHATS_NEW = [
+    // October 13, 2026
+    { v: '3.102.2', items: [
+      'Benchmark button on Osceola cases. It searches the Clerk\u2019s site for the Court Case Number on Case Summary and opens the case. If you are not logged in to Benchmark, it asks you to log in first.',
+      'Record Depo button on every case. It shows the sound level while it records, and the audio file (case name, date and time) downloads when you stop. A backup keeps it safe if Chrome crashes.',
+      'Search box above a case’s Activity feed. Type words or a date like 10/2 to show only matching items. Click "Search older items" to include older activity.',
+      'In the file preview, the Left and Right arrow keys flip to the previous or next file, like Up and Down.',
+      'The checkbox column in the PD9 table is narrower.',
+      'This What’s new box. You can open it again from Improver Options.',
+    ] },
+    { staff: '1.6.2', items: [
+      'Flag tasks red, yellow or green. Hover a task and press 1, 2 or 3, or select several and flag them all at once.',
+      'Sort tasks by due date, newest first, or priority, and show one color at a time.',
+      'Search box on the Tasks page. Type any word or a date like 9/28 to filter the tasks.',
+      'Benchmark button on Osceola cases. It searches the Clerk’s site for the Court Case Number on Case Summary.',
+      'Record Depo button on every case. The audio file downloads when you stop.',
+      'Search box above a case’s Activity feed, and Left/Right arrow keys in the file preview.',
+    ] },
+  ];
+  const WHATS_NEW_SEEN = 'pd9-whats-new-seen';
+  const scriptVersion = () => (typeof GM_info !== 'undefined' && GM_info.script && GM_info.script.version) || '';
+  const versionNum = (v) => String(v || '0').split('.').map((n) => parseInt(n, 10) || 0).reduce((t, n) => t * 1000 + n, 0);
+
+  function whatsNewItems(sinceVersion) {
+    const key = STAFF ? 'staff' : 'v';
+    const since = sinceVersion ? versionNum(sinceVersion) : -1;
+    const now = versionNum(scriptVersion() || '999');
+    const groups = WHATS_NEW.filter((g) => g[key] && versionNum(g[key]) <= now)
+      .sort((a, b) => versionNum(b[key]) - versionNum(a[key]));
+    const fresh = groups.filter((g) => versionNum(g[key]) > since);
+    // After an update with nothing new to list (a small fix), show nothing.
+    if (sinceVersion && !fresh.length) return [];
+    return (fresh.length ? fresh : groups).flatMap((g) => g.items).slice(0, 8);
+  }
+
+  function showWhatsNew(items, fromMenu) {
+    document.getElementById('pd9-whatsnew')?.remove();
+    if (!items.length) { if (fromMenu) toast('Nothing new to show.'); return; }
+    const card = document.createElement('div');
+    card.id = 'pd9-whatsnew';
+    card.setAttribute('role', 'status');
+    card.setAttribute('aria-live', 'polite');
+    card.innerHTML = `
+      <div class="pd9-wn-head"><b>What's new in the ${STAFF ? 'Staff script' : 'Improver'}</b><span class="pd9-wn-ver">v${escapeHtml(scriptVersion())}</span>
+        <button type="button" class="pd9-wn-x" aria-label="Close">&#215;</button></div>
+      <ul>${items.map((t) => `<li>${escapeHtml(t)}</li>`).join('')}</ul>
+      <div class="pd9-wn-foot"><button type="button" class="pd9-wn-ok">Got it</button></div>`;
+    const close = () => { card.classList.add('pd9-wn-out'); setTimeout(() => card.remove(), 200); };
+    card.querySelector('.pd9-wn-x').addEventListener('click', close);
+    card.querySelector('.pd9-wn-ok').addEventListener('click', close);
+    // Stay out of the way of the deposition recorder.
+    const depoPanel = document.getElementById('pd9-depo');
+    if (depoPanel) card.style.bottom = `${Math.round(window.innerHeight - depoPanel.getBoundingClientRect().top + 12)}px`;
+    document.body.appendChild(card);
+    // From the update (not the menu), fade away after 20 seconds unless the mouse is on it.
+    if (!fromMenu) {
+      let timer = setTimeout(close, 20000);
+      card.addEventListener('mouseenter', () => clearTimeout(timer));
+      card.addEventListener('mouseleave', () => { timer = setTimeout(close, 8000); });
+    }
+  }
+
+  // Once per new version, a few seconds after the page loads.
+  if (!IN_FRAME) setTimeout(() => {
+    const now = scriptVersion();
+    if (!now) return;
+    const seen = store.get(WHATS_NEW_SEEN, '');
+    if (seen === now) return;
+    store.set(WHATS_NEW_SEEN, now);
+    showWhatsNew(whatsNewItems(seen), false);
+  }, 4000);
+
   // ---------- "Improver Options" in the account menu ----------
   // Filevine draws the account menu only when it opens. When it does, we copy
   // its "Filevine Settings" item (so the look matches) and add ours below it.
@@ -943,6 +1044,7 @@
           </div>
         </div>
         <div class="pd9-foot">
+          <button type="button" class="pd9-btn pd9-whatsnew-btn" title="See what changed in recent updates">What's new</button>
           <button type="button" class="pd9-btn pd9-reset">Reset to defaults</button>
           <button type="button" class="pd9-btn pd9-export" title="Save your templates to a file">Export</button>
           <button type="button" class="pd9-btn pd9-import" title="Add templates from a file">Import</button>
@@ -957,6 +1059,7 @@
     document.body.appendChild(overlay);
 
     const q = (s) => overlay.querySelector(s);
+    q('.pd9-whatsnew-btn').addEventListener('click', () => showWhatsNew(whatsNewItems(''), true));
     const zoomSel = q('.pd9-zoomsel');
     zoomSel.value = String(store.get(WIN_ZOOM_KEY, 'auto'));
     if (!zoomSel.value) zoomSel.value = 'auto';
@@ -2652,7 +2755,7 @@
     if (existing && (existing.dataset.pid !== String(pid) || !caseNo)) existing.remove();
     if (!caseNo || document.getElementById('pd9-bench-btn')) {
       const b = document.getElementById('pd9-bench-btn');
-      if (b) { b.dataset.caseNo = caseNo; b.title = `Look up ${caseNo} on the Osceola Clerk's site (opens a new tab)`; }
+      if (b) { b.dataset.caseNo = caseNo; b.title = `Look up ${caseNo} on the Osceola Clerk's site (new tab)`; }
       return;
     }
     const vitals = [...document.querySelectorAll('.vitals-toggle button, button')].find((b) => /^\s*vitals\s*$/i.test(b.querySelector('.vitals-btn-text')?.textContent || ''));
@@ -2661,7 +2764,7 @@
     btn.id = 'pd9-bench-btn';
     btn.dataset.pid = String(pid);
     btn.dataset.caseNo = caseNo;
-    btn.title = `Look up ${caseNo} on the Osceola Clerk's site (opens a new tab)`;
+    btn.title = `Look up ${caseNo} on the Osceola Clerk's site (new tab)`;
     const icon = btn.querySelector('i');
     if (icon) {
       const hidden = icon.querySelector('.visually-hidden');
@@ -4139,6 +4242,24 @@
     loadOrgTags(r0.orgID || 221).then((l) => { all = l; drawList(); }).catch(() => say('Could not load the tag list.', true));
   }
 
+  // On a wide screen the table fills the space. Spread the extra width over the
+  // real columns only, so the checkbox column stays narrow.
+  function fitHubColumns(table) {
+    const wrap = table && table.closest('.pd9-hs-wrap');
+    if (!wrap) return;
+    const cols = [...table.querySelectorAll('col')];
+    const pick = cols[0];
+    const rest = cols.slice(1);
+    rest.forEach((c) => { if (!c.dataset.base) c.dataset.base = String(parseFloat(c.style.width) || 100); });
+    const pickW = parseFloat(pick.style.width) || 50;
+    const base = rest.reduce((n, c) => n + Number(c.dataset.base), 0);
+    const room = wrap.clientWidth - pickW;
+    const factor = room > base ? room / base : 1;
+    rest.forEach((c) => { c.style.width = `${Math.floor(Number(c.dataset.base) * factor)}px`; });
+    table.style.width = `${pickW + rest.reduce((n, c) => n + parseFloat(c.style.width), 0)}px`;
+  }
+  window.addEventListener('resize', () => { const t = document.querySelector('#pd9-hub-sorted .pd9-hs-wrap table'); if (t) fitHubColumns(t); });
+
   function drawOwnTable(ov) {
     if (!hubTable || !hubTable.rows) return;
     learnAvatarColors();
@@ -4167,7 +4288,7 @@
     wrap.textContent = '';
     const table = document.createElement('table');
     const colgroup = document.createElement('colgroup');
-    const pickW = Math.min(200, Math.max(56, +layout.widths._pick || 64));
+    const pickW = Math.min(200, Math.max(44, +layout.widths._pick || 50));
     const pickCol = document.createElement('col'); pickCol.style.width = `${pickW}px`; colgroup.appendChild(pickCol);
     cols.forEach((c) => { const el = document.createElement('col'); el.style.width = `${layout.widths[c.key] || c.width}px`; el.dataset.key = c.key; colgroup.appendChild(el); });
     table.style.width = `${pickW + cols.reduce((n, c) => n + (layout.widths[c.key] || c.width), 0)}px`;
@@ -4198,7 +4319,7 @@
       const startT = parseFloat(table.style.width);
       pickGrip.setPointerCapture(e.pointerId);
       const move = (ev) => {
-        const w = Math.min(200, Math.max(56, startW + ev.clientX - startX));
+        const w = Math.min(200, Math.max(44, startW + ev.clientX - startX));
         pickCol.style.width = `${w}px`;
         table.style.width = `${startT + w - startW}px`;
       };
@@ -4208,6 +4329,7 @@
         const l = ownLayout();
         l.widths._pick = Math.round(parseFloat(pickCol.style.width));
         saveLayout(l);
+        fitHubColumns(table);
       };
       pickGrip.addEventListener('pointermove', move);
       pickGrip.addEventListener('pointerup', up);
@@ -4262,6 +4384,7 @@
         const move = (ev) => {
           const w = Math.max(70, startW + ev.clientX - startX);
           colEl.style.width = `${w}px`;
+          colEl.dataset.base = String(w);
           table.style.width = `${startT + w - startW}px`;
         };
         const up = () => {
@@ -4271,6 +4394,9 @@
           const l = ownLayout();
           l.widths[c.key] = Math.round(parseFloat(colEl.style.width));
           saveLayout(l);
+          // If the table is now narrower than the screen, spread the gap over the other columns.
+          const wrapEl = table.closest('.pd9-hs-wrap');
+          if (wrapEl && parseFloat(table.style.width) < wrapEl.clientWidth) fitHubColumns(table);
         };
         grip.addEventListener('pointermove', move);
         grip.addEventListener('pointerup', up);
@@ -4335,6 +4461,7 @@
     });
     table.append(colgroup, thead, tbody);
     wrap.appendChild(table);
+    fitHubColumns(table);
     [wrap.scrollTop, wrap.scrollLeft] = keepScroll;
     const named = hubTable.rows.filter((r) => r.defendant !== undefined).length;
     const soon = rows.filter((r) => { const e = nextOf(r); return e && e.when - Date.now() < 3 * 864e5; }).length;
@@ -5604,7 +5731,7 @@
   // ---------- Filing Cabinet: quick preview ----------
   // An eye button on each file opens it in a panel on the right, using Filevine's
   // own viewer (/docwebviewer/view/<id>), without leaving the file list.
-  // While the panel is open: Up/Down arrows go to the previous/next file, Esc closes.
+  // While the panel is open: the arrow keys go to the previous/next file, Esc closes.
   const DOCPREV_W_KEY = 'pd9-docprev-width';
   const docRows = () => $$('.ag-center-cols-container .ag-row[row-id^="doc-"], .ag-pinned-left-cols-container .ag-row[row-id^="doc-"]')
     .filter((r, i, all) => all.findIndex((x) => x.getAttribute('row-id') === r.getAttribute('row-id')) === i)
@@ -5623,7 +5750,7 @@
       const b = document.createElement('button');
       b.type = 'button';
       b.className = 'pd9-doc-eye';
-      b.title = 'Preview here (Up/Down for the next file)';
+      b.title = 'Preview here (arrow keys flip through the files)';
       b.setAttribute('aria-label', `Preview ${docNameOf(row)}`);
       b.innerHTML = '<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/><circle cx="12" cy="12" r="3" fill="none" stroke="currentColor" stroke-width="2"/></svg>';
       // Keep the click away from Filevine, which would open the file in a new tab.
@@ -5654,8 +5781,8 @@
       panel.innerHTML = `
         <span class="pd9-dp-edge" title="Drag to resize" aria-hidden="true"></span>
         <header class="pd9-dp-head">
-          <button type="button" class="pd9-dp-btn pd9-dp-prev" title="Previous file (Up arrow)" aria-label="Previous file"><svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="M6 15l6-6 6 6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
-          <button type="button" class="pd9-dp-btn pd9-dp-next" title="Next file (Down arrow)" aria-label="Next file"><svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="M6 9l6 6 6-6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+          <button type="button" class="pd9-dp-btn pd9-dp-prev" title="Previous file (Up or Left arrow)" aria-label="Previous file"><svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="M6 15l6-6 6 6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+          <button type="button" class="pd9-dp-btn pd9-dp-next" title="Next file (Down or Right arrow)" aria-label="Next file"><svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="M6 9l6 6 6-6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
           <span class="pd9-dp-title"></span>
           <span class="pd9-dp-count"></span>
           <button type="button" class="pd9-dp-btn pd9-dp-tab" title="Open in a new tab" aria-label="Open in a new tab"><svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true"><path d="M14 5h5v5M19 5l-8 8M18 14v5H5V6h5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
@@ -5773,7 +5900,11 @@
     if (!document.getElementById('pd9-docprev')) return;
     const t = e.target;
     if (t && (t.isContentEditable || /^(input|textarea|select)$/i.test(t.tagName || ''))) return;
-    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { e.preventDefault(); e.stopPropagation(); stepDocPreview(e.key === 'ArrowDown' ? 1 : -1); }
+    // Up/Down work everywhere. Left/Right work too, except inside the file itself,
+    // where Filevine's viewer may use them to turn pages.
+    const inViewer = t && t.ownerDocument && t.ownerDocument !== document;
+    const step = { ArrowDown: 1, ArrowUp: -1, ArrowRight: inViewer ? 0 : 1, ArrowLeft: inViewer ? 0 : -1 }[e.key];
+    if (step && !e.altKey && !e.ctrlKey && !e.metaKey) { e.preventDefault(); e.stopPropagation(); stepDocPreview(step); }
     else if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); closeDocPreview(); }
   }
   function closeDocPreview() {
@@ -6044,6 +6175,141 @@
     drawTriage();
   }
 
+  // ---------- Search the activity feed ----------
+  // A search box above a case's Activity feed (and the Tasks page). Every word
+  // typed must appear in the item. Matches are highlighted. Filevine only loads
+  // the newest items at first, so "Search older items" scrolls the feed down to
+  // load the rest. Nothing is changed in Filevine; items are just hidden.
+  const ff = { query: '', route: '', seen: -1, loading: false, timer: 0 };
+  const ffItems = () => $$('ul.activity-group-list > li.activity-list-item');
+  const ffRoute = () => (location.hash.match(/^#\/(project\/\d+|tasks)/) || [])[0] || location.hash;
+
+  function ffApply() {
+    const items = ffItems();
+    const words = ff.query.toLowerCase().split(/\s+/).filter(Boolean);
+    let shown = 0;
+    items.forEach((li) => {
+      const t = (li.textContent || '').replace(/\s+/g, ' ').toLowerCase();
+      const hit = !words.length || words.every((w) => t.includes(w));
+      li.classList.toggle('pd9-ff-hide', !hit);
+      if (hit) shown += 1;
+    });
+    $$('.activity-item-group').forEach((g) => {
+      const has = !words.length || !!g.querySelector('li.activity-list-item:not(.pd9-ff-hide)');
+      g.classList.toggle('pd9-ff-hide-group', !has);
+    });
+    ff.seen = items.length;
+    ffHighlight(words, items);
+    const bar = document.getElementById('pd9-feedfind');
+    if (!bar) return;
+    const count = $('.pd9-ff-count', bar);
+    const more = $('.pd9-ff-more', bar);
+    count.textContent = words.length ? (shown ? `${shown} of ${items.length} loaded` : `No matches in ${items.length} loaded`) : '';
+    count.dataset.none = String(!!words.length && !shown);
+    more.hidden = !words.length || ff.loading;
+    $('.pd9-ff-clear', bar).hidden = !ff.query;
+  }
+
+  // Highlight the matches without changing the page (CSS Custom Highlight API).
+  function ffHighlight(words, items) {
+    if (!window.CSS || !CSS.highlights || typeof Highlight === 'undefined') return;
+    CSS.highlights.delete('pd9-ff');
+    if (!words.length) return;
+    const ranges = [];
+    for (const li of items) {
+      if (li.classList.contains('pd9-ff-hide')) continue;
+      const walker = document.createTreeWalker(li, NodeFilter.SHOW_TEXT);
+      for (let n = walker.nextNode(); n && ranges.length < 1500; n = walker.nextNode()) {
+        const low = n.nodeValue.toLowerCase();
+        for (const w of words) {
+          for (let at = low.indexOf(w); at >= 0; at = low.indexOf(w, at + w.length)) {
+            const r = new Range();
+            r.setStart(n, at);
+            r.setEnd(n, at + w.length);
+            ranges.push(r);
+          }
+        }
+      }
+    }
+    if (ranges.length) CSS.highlights.set('pd9-ff', new Highlight(...ranges));
+  }
+
+  // Scroll the feed to the bottom until Filevine stops adding older items.
+  async function ffLoadOlder() {
+    const box = $('.activity-main') || $('.fv-vscrollbox');
+    const bar = document.getElementById('pd9-feedfind');
+    if (!box || ff.loading) return;
+    ff.loading = true;
+    const status = bar && $('.pd9-ff-count', bar);
+    const keepTop = box.scrollTop;
+    let last = -1;
+    let still = 0;
+    for (let i = 0; i < 80 && still < 3; i += 1) {
+      const n = ffItems().length;
+      if (status) status.textContent = `Loading older items... ${n} so far`;
+      box.scrollTop = box.scrollHeight;
+      box.dispatchEvent(new Event('scroll'));
+      const moreBtn = [...box.querySelectorAll('button')].find((b) => /^(load|show) more/i.test(b.textContent.trim()) && b.offsetParent);
+      if (moreBtn) moreBtn.click();
+      await sleep(700);
+      const now = ffItems().length;
+      still = now === last ? still + 1 : 0;
+      last = now;
+    }
+    box.scrollTop = keepTop;
+    ff.loading = false;
+    ffApply();
+  }
+
+  function addFeedSearch() {
+    const host = $('.activity-content');
+    let bar = document.getElementById('pd9-feedfind');
+    // Staff already have a search box in the Tasks triage bar.
+    if (!host || (STAFF && onTasksPage())) {
+      if (bar) bar.remove();
+      if (ff.query || $('.pd9-ff-hide')) { $$('.pd9-ff-hide').forEach((li) => li.classList.remove('pd9-ff-hide')); if (window.CSS && CSS.highlights) CSS.highlights.delete('pd9-ff'); }
+      return;
+    }
+    const route = ffRoute();
+    if (route !== ff.route) { ff.route = route; ff.query = ''; ff.seen = -1; if (bar) { $('input', bar).value = ''; } }
+    if (!bar) {
+      bar = document.createElement('div');
+      bar.id = 'pd9-feedfind';
+      bar.innerHTML = `
+        <span class="pd9-ff-field">
+          <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"/><path d="M16 16l4.5 4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+          <input type="search" autocomplete="off" spellcheck="false">
+          <button type="button" class="pd9-ff-clear" aria-label="Clear search" hidden>&#215;</button>
+        </span>
+        <span class="pd9-ff-count" role="status" aria-live="polite"></span>
+        <button type="button" class="pd9-ff-more" hidden title="Filevine loads the newest items first. This loads the older ones so the search covers everything.">Search older items</button>`;
+      const box = $('input', bar);
+      box.placeholder = onTasksPage() ? 'Search tasks' : 'Search activity (words or a date like 10/2)';
+      box.setAttribute('aria-label', box.placeholder);
+      box.value = ff.query;
+      box.addEventListener('input', () => { ff.query = box.value.trim(); clearTimeout(ff.timer); ff.timer = setTimeout(ffApply, 120); });
+      box.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape' && box.value) { e.stopPropagation(); box.value = ''; ff.query = ''; ffApply(); }
+      });
+      // Keep Filevine's and the Improver's shortcut keys out of the box.
+      ['keydown', 'keyup', 'keypress'].forEach((t) => box.addEventListener(t, (e) => { if (e.key !== 'Escape') e.stopPropagation(); }));
+      $('.pd9-ff-clear', bar).addEventListener('click', () => { box.value = ''; ff.query = ''; ffApply(); box.focus(); });
+      $('.pd9-ff-more', bar).addEventListener('click', ffLoadOlder);
+    }
+    // Right after Filevine's Filter button. If that is not there, above the feed.
+    const filterBtn = $('button[data-testid="activity-filter-button"]')
+      || $$('.activity-page-controls button').find((b) => /^\s*filter\s*$/i.test(b.textContent || ''));
+    if (filterBtn) {
+      if (bar.previousElementSibling !== filterBtn) filterBtn.after(bar);
+      bar.classList.add('pd9-ff-inline');
+    } else {
+      if (bar.nextElementSibling !== host && host.parentNode) host.parentNode.insertBefore(bar, host);
+      bar.classList.remove('pd9-ff-inline');
+    }
+    // New items came in (scrolling, a new note): filter them too.
+    if (ff.query && ffItems().length !== ff.seen) ffApply();
+  }
+
   function decorate() {
     watchProject();
     addOptionsMenuItem();
@@ -6067,6 +6333,7 @@
     addDepoButton();
     if (!STAFF) addSwitchButton();
     addDocPreview();
+    addFeedSearch();
     for (const form of $$(COMPOSERS)) {
       const layout = $(SEL.layout, form);
       if (layout && !$('.fvqn-wrap', form)) layout.parentNode.insertBefore(buildBar(form), layout);
@@ -6691,8 +6958,8 @@
     .pd9-task-x:hover { opacity: 1; background: #fee4e2; color: #b42318; }
     .pd9-task-home:focus-visible, .pd9-task-name:focus-visible, .pd9-task-x:focus-visible { outline: 2px solid #1f7a77; outline-offset: 1px; }
     /* Selecting cases in the PD9 table */
-    #pd9-hub-sorted .pd9-pick { padding: 0 0 0 14px !important; text-align: left; cursor: default; white-space: nowrap; }
-    #pd9-hub-sorted .pd9-pin-btn { all: unset; display: inline-grid; place-items: center; width: 24px; height: 24px; margin-left: 6px; border-radius: 6px; vertical-align: middle; color: #98a2b3; cursor: pointer; opacity: 0; }
+    #pd9-hub-sorted .pd9-pick { padding: 0 0 0 10px !important; text-align: left; cursor: default; white-space: nowrap; }
+    #pd9-hub-sorted .pd9-pin-btn { all: unset; display: inline-grid; place-items: center; width: 22px; height: 22px; margin-left: 2px; border-radius: 6px; vertical-align: middle; color: #98a2b3; cursor: pointer; opacity: 0; }
     #pd9-hub-sorted tr:hover .pd9-pin-btn, #pd9-hub-sorted .pd9-pin-btn:focus-visible, #pd9-hub-sorted .pd9-pin-btn.pd9-pin-on { opacity: 1; }
     #pd9-hub-sorted .pd9-pin-btn:hover { background: rgba(16, 24, 40, .07); color: #1d2433; }
     #pd9-hub-sorted .pd9-pin-btn.pd9-pin-on { color: #1f7a77; }
@@ -7058,6 +7325,49 @@
     #pd9-depo.pd9-depo-mini .pd9-depo-mini-meter { display: block; position: relative; width: 70px; height: 6px; border-radius: 3px; background: #232831; overflow: hidden; }
     #pd9-depo.pd9-depo-mini .pd9-depo-mini-fill { position: absolute; inset: 0 auto 0 0; background: #32d583; border-radius: 3px; }
     #pd9-depo.pd9-depo-mini .pd9-depo-mini-time { display: inline; font: 600 13px ui-monospace, Consolas, monospace; font-variant-numeric: tabular-nums; }
+    /* ---------- Activity feed search ---------- */
+    #pd9-feedfind { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 8px 0; }
+    .pd9-ff-field { position: relative; display: inline-flex; align-items: center; color: #667085; }
+    #pd9-feedfind.pd9-ff-inline { display: inline-flex; flex-wrap: nowrap; margin: 0 0 0 10px; vertical-align: middle; }
+    #pd9-feedfind.pd9-ff-inline .pd9-ff-field input { width: 260px; max-width: 30vw; }
+    #pd9-feedfind.pd9-ff-inline .pd9-ff-count { white-space: nowrap; }
+    .pd9-ff-field svg { position: absolute; left: 10px; pointer-events: none; }
+    .pd9-ff-field input { width: 320px; max-width: 60vw; height: 32px; padding: 0 30px 0 32px; border-radius: 8px; border: 1px solid var(--t-color-border-secondary, #d0d5dd);
+      background: var(--t-color-background-primary, #fff); color: var(--t-color-text-primary, #1d2433); font: inherit; font-size: 13px; }
+    .pd9-ff-field input::-webkit-search-cancel-button { display: none; }
+    .pd9-ff-field input:focus { outline: none; border-color: #1f7a77; box-shadow: 0 0 0 3px rgba(31,122,119,.18); }
+    .pd9-ff-clear { position: absolute; right: 4px; width: 24px; height: 24px; border: 0; border-radius: 6px; background: none; color: #667085; font-size: 16px; line-height: 1; cursor: pointer; }
+    .pd9-ff-clear:hover { background: rgba(16,24,40,.07); color: #1d2433; }
+    .pd9-ff-count { font-size: 12px; color: #667085; }
+    .pd9-ff-count[data-none="true"] { color: #b42318; }
+    .pd9-ff-more { height: 28px; padding: 0 10px; border-radius: 7px; border: 1px solid var(--t-color-border-secondary, #d0d5dd); background: var(--t-color-background-primary, #fff); color: #1f7a77; font: inherit; font-size: 12px; font-weight: 600; cursor: pointer; }
+    .pd9-ff-more:hover { background: #e7f3f2; }
+    li.activity-list-item.pd9-ff-hide, .activity-item-group.pd9-ff-hide-group { display: none !important; }
+    ::highlight(pd9-ff) { background-color: #fde68a; color: #1d2433; }
+    html.pd9-dark .pd9-ff-field input { background: #1b1f24; border-color: #3a414b; color: #e6e9ee; }
+    html.pd9-dark .pd9-ff-more { background: #1b1f24; border-color: #3a414b; color: #5fd4c4; }
+    html.pd9-dark .pd9-ff-more:hover { background: #17302d; }
+    html.pd9-dark .pd9-ff-count[data-none="true"] { color: #f97066; }
+    html.pd9-dark ::highlight(pd9-ff) { background-color: #8a6d12; color: #fff; }
+    /* ---------- What's new card ---------- */
+    #pd9-whatsnew { position: fixed; left: 20px; bottom: 20px; z-index: 2147483001; width: 340px; max-width: calc(100vw - 40px); padding: 12px 14px 10px; border-radius: 12px;
+      background: #fff; color: #1d2433; border: 1px solid #e4e7ec; box-shadow: 0 12px 32px -12px rgba(16,24,40,.28); font: 13px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
+      animation: pd9-wn-in .22s ease-out; }
+    #pd9-whatsnew.pd9-wn-out { opacity: 0; transform: translateY(6px); transition: opacity .2s, transform .2s; }
+    @keyframes pd9-wn-in { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+    .pd9-wn-head { display: flex; align-items: center; gap: 8px; }
+    .pd9-wn-head b { font-size: 13px; }
+    .pd9-wn-ver { font-size: 11px; color: #667085; }
+    .pd9-wn-x { margin-left: auto; width: 24px; height: 24px; border: 0; border-radius: 6px; background: none; color: #667085; font-size: 16px; line-height: 1; cursor: pointer; }
+    .pd9-wn-x:hover { background: #f2f4f7; color: #1d2433; }
+    #pd9-whatsnew ul { margin: 8px 0 0; padding-left: 18px; }
+    #pd9-whatsnew li { margin: 0 0 5px; }
+    .pd9-wn-foot { display: flex; justify-content: flex-end; margin-top: 4px; }
+    .pd9-wn-ok { height: 28px; padding: 0 12px; border-radius: 7px; border: 1px solid #1f7a77; background: #1f7a77; color: #fff; font: inherit; font-weight: 600; cursor: pointer; }
+    .pd9-wn-ok:hover { background: #155e5b; }
+    html.pd9-dark #pd9-whatsnew { background: #1b1f24; color: #e6e9ee; border-color: #2f3742; box-shadow: 0 12px 32px -12px rgba(0,0,0,.7); }
+    html.pd9-dark .pd9-wn-ver, html.pd9-dark .pd9-wn-x { color: #8b95a3; }
+    html.pd9-dark .pd9-wn-x:hover { background: #262c35; color: #fff; }
     .pd9-ver { margin-left: 4px; font-size: .85em; font-weight: 400; opacity: .5; }
     .fvqn-toast {
       position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
