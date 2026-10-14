@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PD9 Filevine Improver
 // @namespace    https://filevine.local/pd9-improver
-// @version      3.105.1
+// @version      3.105.2
 // @description  Faster notes, tasks, and case closing in Filevine for PD9.
 // @match        https://*.filevine.com/*
 // @match        https://*.filevineapp.com/*
@@ -737,11 +737,30 @@
     }
   }
 
+  // A fresh, empty note box should not start with tags left over from a
+  // template (like #CLIENTCOMM). Tags you add yourself after that stay.
+  const freshBoxes = new WeakSet();
+  function clearLeftoverTemplateTags(form) {
+    const box = $(SEL.message, form);
+    if (!box || freshBoxes.has(box) || !isVisible(box)) return;
+    freshBoxes.add(box);
+    if (box.textContent.trim()) return; // has text (a draft or a template): leave it alone
+    setTimeout(() => {
+      if (box.textContent.trim()) return;
+      const names = templateTags().map(norm);
+      $$(SEL.tagChip, form)
+        .filter((chip) => names.includes(norm(chip.getAttribute('data-testid').slice('tag-chip-'.length))))
+        .forEach((chip) => { const btn = chip.querySelector('button.icon-button-right, button'); if (btn) btn.click(); });
+    }, 400);
+  }
+
   function clearTagsIfReopened(form) {
     const kind = kindOf(form);
     // Wait until the old box is gone, so we only act on the reopened one.
     if (!closedAt[kind] || Date.now() - closedAt[kind] < 400) return;
-    if (!isVisible($(SEL.message, form))) return;
+    const box = $(SEL.message, form);
+    if (!isVisible(box)) return;
+    if (box.textContent.trim()) return; // still has text (for example a save that didn't go through): keep the tags
     closedAt[kind] = 0;
     clearAllTags(form);
   }
@@ -6493,6 +6512,7 @@
       const layout = $(SEL.layout, form);
       if (layout && !$('.fvqn-wrap', form)) layout.parentNode.insertBefore(buildBar(form), layout);
       clearTagsIfReopened(form);
+      clearLeftoverTemplateTags(form);
       autoShowTags(form);
       updateWarning(form);
       addRestoreButton(form);
@@ -6645,7 +6665,14 @@
 
   document.addEventListener('click', (e) => {
     const form = composerOf(e.target);
-    if (form && findSaveButton(form) && findSaveButton(form).contains(e.target)) clearDraftAfterSave(form);
+    if (form && findSaveButton(form) && findSaveButton(form).contains(e.target)) {
+      clearDraftAfterSave(form);
+      // Filevine keeps the tags for the next note after you save, too (so a
+      // #CLIENTCOMM from a call showed up on the next plain note). Clear them
+      // the next time the box is empty and open.
+      closedAt[kindOf(form)] = Date.now();
+      [700, 1500, 3000].forEach((ms) => setTimeout(() => { if (form.isConnected) clearTagsIfReopened(form); }, ms));
+    }
   }, true);
 
   // ---------- keys ----------
