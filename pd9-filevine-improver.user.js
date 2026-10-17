@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PD9 Filevine Improver
 // @namespace    https://filevine.local/pd9-improver
-// @version      3.113.2
+// @version      3.114.0
 // @description  Faster notes, tasks, and case closing in Filevine for PD9.
 // @match        https://*.filevine.com/*
 // @match        https://*.filevineapp.com/*
@@ -916,10 +916,10 @@
   // Newest first. "v" is the Improver version that brought it; "staff" is the Staff
   // version. Leave one out to hide the item from that script.
   const WHATS_NEW = [
-    { v: '3.112.0', items: [
+    { v: '3.114.0', items: [
       { top: true, t: 'Stac view: works like the old STAC layout. Click a case in the PD9 table and it opens on the right, while your case list stays on the left. At the top of the list, one search box filters your cases as you type. Press Enter to also search all of Filevine by name or case number. Esc or \u00D7 closes the case. Turn it off with the "Stac mode" box next to "Window mode".' },
       'In Stac view, Switch case opens the case on the right too. Tasks and Feed at the top show on the left, in place of your cases. Click a case name in an item to open it on the right. Esc, \u00D7, or the same button again brings your cases back. Documents opens in a new tab, and Project Hub closes the case.',
-      'Seasonal theme: pick "Fall" under Theme in Improver Options for warm cream pages, rust buttons, and a deep green header.',
+      'Seasonal theme: pick "Seasonal" under Theme in Improver Options. Fall runs through Thanksgiving, then a Winter holiday look takes over until January 6.',
       'Feed: Ctrl+click cards to select them (Shift+click selects a run), then press "Got it on all" in the bar at the bottom. A plain click still opens a card.',
       'Filing Cabinet: in list view, "Expand all" next to the list/grid switch opens every folder, including folders inside folders. Click it again to close them all.',
     ] },
@@ -1151,7 +1151,11 @@
     seasonSel.addEventListener('change', () => {
       store.set(SEASON_KEY, seasonSel.value);
       applySeason();
-      toast(seasonSel.value ? `${seasonSel.selectedOptions[0].textContent} theme on${darkOn() ? ' (shows when dark mode is off)' : ''}` : 'Seasonal theme off');
+      const look = seasonLook();
+      const name = { fall: 'Fall', winter: 'Winter holiday' }[look];
+      toast(!seasonSel.value ? 'Seasonal theme off'
+        : !look ? 'Seasonal theme on. Nothing in season today, so Filevine looks normal.'
+          : `${name} theme on${darkOn() ? ' (shows when dark mode is off)' : ''}`);
     });
     const ul = q('.pd9-list');
     const f = { label: q('[name=label]'), subject: q('[name=subject]'), type: q('[name=type]'), tag: q('[name=tag]'), body: q('[name=body]') };
@@ -5768,12 +5772,38 @@
     applySeason();
   }
   // Seasonal color themes (Improver Options > Theme). Light themes, so dark mode wins.
+  // "Seasonal" follows the calendar: Fall from September 22 through Thanksgiving,
+  // Winter holiday from the day after Thanksgiving through January 6, then
+  // Filevine's normal look until the next fall. Fall and Winter holiday can also
+  // be picked to keep one on all year.
   const SEASON_KEY = 'pd9-season';
-  const SEASONS = [['', 'Default'], ['fall', 'Fall']];
+  const SEASON_LOOKS = ['fall', 'winter'];
+  const SEASONS = [['', 'Default'], ['auto', 'Seasonal (follows the calendar)'], ['fall', 'Fall'], ['winter', 'Winter holiday']];
+  // Picking "Fall" before the calendar option existed meant "the seasonal theme".
+  if (store.get('pd9-season-auto-moved', false) !== true) {
+    if (store.get(SEASON_KEY, '') === 'fall') store.set(SEASON_KEY, 'auto');
+    store.set('pd9-season-auto-moved', true);
+  }
   const seasonNow = () => { const v = store.get(SEASON_KEY, ''); return SEASONS.some(([k]) => k === v) ? v : ''; };
+  function thanksgiving(year) { // fourth Thursday of November
+    const first = new Date(year, 10, 1).getDay();
+    return new Date(year, 10, 1 + ((4 - first + 7) % 7) + 21);
+  }
+  function calendarSeason(d = new Date()) {
+    const y = d.getFullYear();
+    const day = new Date(y, d.getMonth(), d.getDate());
+    if (d.getMonth() === 0 && d.getDate() <= 6) return 'winter';
+    const tg = thanksgiving(y);
+    if (day > tg) return 'winter';
+    if (day >= new Date(y, 8, 22)) return 'fall';
+    return '';
+  }
+  const seasonLook = () => { const v = seasonNow(); return v === 'auto' ? calendarSeason() : v; };
   function applySeason() {
-    const on = !DARK_SKIP && !darkOn() ? seasonNow() : '';
-    SEASONS.forEach(([k]) => { if (k) document.documentElement.classList.toggle(`pd9-season-${k}`, on === k); });
+    const look = !DARK_SKIP && !darkOn() ? seasonLook() : '';
+    const root = document.documentElement;
+    root.classList.toggle('pd9-season', !!look);
+    SEASON_LOOKS.forEach((k) => root.classList.toggle(`pd9-season-${k}`, look === k));
   }
   function toggleDark() {
     store.set(DARK_KEY, !darkOn());
@@ -5794,7 +5824,7 @@
   window.addEventListener('focus', () => applyDark());
   setInterval(() => {
     if (document.documentElement.classList.contains('pd9-dark') !== darkOn()) applyDark();
-    else if (!!seasonNow() !== SEASONS.some(([k]) => k && document.documentElement.classList.contains(`pd9-season-${k}`)) && !darkOn()) applySeason();
+    else applySeason(); // cheap; also catches the date rolling over to a new season
   }, 2000);
   applyDark();
 
@@ -8024,135 +8054,148 @@
     .pd9-tag-edit .pd9-te-note:empty { display: none; }
     .pd9-tag-edit .pd9-te-bad { color: #b42318; }
     .pd9-tag-edit.pd9-te-busy .pd9-te-list, .pd9-tag-edit.pd9-te-busy .pd9-te-on { opacity: .5; pointer-events: none; }
-    /* ---------- Fall theme ----------
-       Tokens first (--fall-*), then Filevine's theme colors and the Improver's own
-       parts mapped onto them. Change a token to change it everywhere. */
+    /* ---------- Seasonal themes (Fall, Winter holiday) ----------
+       Each season sets the same tokens (--ss-*); the rules below map Filevine's
+       theme colors and the Improver's own parts onto them. html.pd9-season is on
+       whenever a season shows, plus html.pd9-season-fall or -winter for its tokens. */
     :root.pd9-season-fall {
-      --fall-bg-page: #FAF7F2; --fall-bg-surface: #FFFFFF; --fall-bg-raised: #FFFFFF; --fall-bg-hover: #F3EEE6; --fall-bg-selected: #F3E3D3;
-      --fall-border: #E8E2D9; --fall-border-strong: #D6CEC2;
-      --fall-text: #2B2622; --fall-text-secondary: #6B625A; --fall-text-faint: #8C8279; --fall-text-disabled: #B5ACA2;
-      --fall-accent: #B4532A; --fall-accent-hover: #96421F; --fall-on-accent: #FFFFFF; --fall-focus: #2E3B33;
-      --fall-inverse-bg: #2E3B33; --fall-inverse-text: #FFFFFF; --fall-inverse-accent: #F3E3D3;
-      --fall-success: #3E5733; --fall-success-bg: #E4EDDF; --fall-warning: #6E5214; --fall-warning-bg: #F5E8C8;
-      --fall-danger: #7A2C24; --fall-danger-bg: #F4DEDB; --fall-soon: #96421F;
-      --fall-b1: #B4532A; --fall-b2: #2E3B33; --fall-b3: #5B7F4B; --fall-b4: #8A6A1F; --fall-b5: #7A4E6B;
+      --ss-bg-page: #FAF7F2; --ss-bg-surface: #FFFFFF; --ss-bg-raised: #FFFFFF; --ss-bg-hover: #F3EEE6; --ss-bg-selected: #F3E3D3;
+      --ss-border: #E8E2D9; --ss-border-strong: #D6CEC2;
+      --ss-text: #2B2622; --ss-text-secondary: #6B625A; --ss-text-faint: #8C8279; --ss-text-disabled: #B5ACA2;
+      --ss-accent: #B4532A; --ss-accent-hover: #96421F; --ss-on-accent: #FFFFFF; --ss-focus: #2E3B33;
+      --ss-inverse-bg: #2E3B33; --ss-inverse-text: #FFFFFF; --ss-inverse-accent: #F3E3D3;
+      --ss-success: #3E5733; --ss-success-bg: #E4EDDF; --ss-warning: #6E5214; --ss-warning-bg: #F5E8C8;
+      --ss-danger: #7A2C24; --ss-danger-bg: #F4DEDB; --ss-soon: #96421F;
+      --ss-logo-mark: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cdefs%3E%3Cmask id='m'%3E%3Crect width='24' height='24' fill='%23fff'/%3E%3Cpath d='M6.2 12.4h3.8L8.1 9.1z M14 12.4h3.8l-1.9-3.3z M11 14.6h2l-1-1.7z' fill='%23000'/%3E%3Cpath d='M5.6 15.6Q12 22 18.4 15.6l-1.7.8-1 1.4-1.2-1.1-1.3 1.5-1.2-1.3-1.2 1.3-1.3-1.5-1.2 1.1-1-1.4z' fill='%23000'/%3E%3C/mask%3E%3C/defs%3E%3Cg mask='url(%23m)' fill='%23fff'%3E%3Cellipse cx='7.6' cy='14.6' rx='5.6' ry='7.4'/%3E%3Cellipse cx='16.4' cy='14.6' rx='5.6' ry='7.4'/%3E%3Cellipse cx='12' cy='14.6' rx='6.2' ry='8'/%3E%3Cpath d='M11.1 7.4l.5-4.4q.2-1 1.2-.7l.9.3-.8 4.8z'/%3E%3C/g%3E%3C/svg%3E");
+      --ss-b1: #B4532A; --ss-b2: #2E3B33; --ss-b3: #5B7F4B; --ss-b4: #8A6A1F; --ss-b5: #7A4E6B;
     }
-    :root.pd9-season-fall[style] {
+    :root.pd9-season-winter {
+      --ss-bg-page: #F8F6F2; --ss-bg-surface: #FFFFFF; --ss-bg-raised: #FFFFFF; --ss-bg-hover: #F0EDE7; --ss-bg-selected: #E6F0E8;
+      --ss-border: #E6E1D9; --ss-border-strong: #CFC8BD;
+      --ss-text: #23201E; --ss-text-secondary: #5E5852; --ss-text-faint: #857E77; --ss-text-disabled: #B6AFA7;
+      --ss-accent: #1F6B45; --ss-accent-hover: #17543A; --ss-on-accent: #FFFFFF; --ss-focus: #2E8B57;
+      --ss-inverse-bg: #7A1F2B; --ss-inverse-text: #FFFFFF; --ss-inverse-accent: #F2DFA7;
+      --ss-success: #1F5A3A; --ss-success-bg: #E2EFE4; --ss-warning: #6B5212; --ss-warning-bg: #F7ECCB;
+      --ss-danger: #8E1F2B; --ss-danger-bg: #F8E1E3; --ss-soon: #A8243A;
+      --ss-logo-mark: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cg fill='none' stroke='%23fff' stroke-width='1.9' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M12 2.2v19.6M9.4 4.4 12 7l2.6-2.6M9.4 19.6 12 17l2.6 2.6'/%3E%3Cg transform='rotate(60 12 12)'%3E%3Cpath d='M12 2.2v19.6M9.4 4.4 12 7l2.6-2.6M9.4 19.6 12 17l2.6 2.6'/%3E%3C/g%3E%3Cg transform='rotate(120 12 12)'%3E%3Cpath d='M12 2.2v19.6M9.4 4.4 12 7l2.6-2.6M9.4 19.6 12 17l2.6 2.6'/%3E%3C/g%3E%3C/g%3E%3C/svg%3E");
+      --ss-b1: #A8243A; --ss-b2: #1F6B45; --ss-b3: #7A1F2B; --ss-b4: #8A6A1F; --ss-b5: #1E4E8C;
+    }
+    :root.pd9-season[style] {
       /* Backgrounds */
-      --t-color-background-tertiary: var(--fall-bg-page); --t-color-background-alternate: var(--fall-bg-page); --t-color-background-secondary: var(--fall-bg-page);
-      --t-color-background-primary: var(--fall-bg-surface); --t-color-background-content: var(--fall-bg-surface); --t-color-background-page-title: var(--fall-bg-surface);
-      --t-color-background-menu: var(--fall-bg-raised); --t-color-background-menu-item-rest: var(--fall-bg-raised); --t-color-background-dropdown-primary: var(--fall-bg-raised);
-      --t-color-background-dialog: var(--fall-bg-raised); --t-color-background-drawer: var(--fall-bg-raised); --t-color-background-drawer-elevated: var(--fall-bg-raised);
-      --t-color-background-text-input: var(--fall-bg-surface); --t-color-background-select: var(--fall-bg-surface); --t-color-background-datepicker: var(--fall-bg-raised);
-      --t-color-background-menu-item-hover: var(--fall-bg-hover); --t-color-background-tab-hover: var(--fall-bg-hover); --t-color-background-hover-row-ag-grid: var(--fall-bg-hover);
-      --t-color-background-row-selected-ag-grid: var(--fall-bg-selected); --t-color-background-secondary-nav-item-active: var(--fall-bg-selected); --t-color-background-brand: var(--fall-bg-selected);
-      --t-color-background-ag-grid: var(--fall-bg-surface); --t-color-background-header-ag-grid: var(--fall-bg-page); --t-color-background-subheader-ag-grid: var(--fall-bg-surface);
-      --t-color-background-toolbar-subheader-ag-grid: var(--fall-bg-page); --t-color-background-control-panel-ag-grid: var(--fall-bg-page); --t-color-background-paging-panel-ag-grid: var(--fall-bg-page);
-      --t-color-background-tab-unselected: var(--fall-bg-surface);
+      --t-color-background-tertiary: var(--ss-bg-page); --t-color-background-alternate: var(--ss-bg-page); --t-color-background-secondary: var(--ss-bg-page);
+      --t-color-background-primary: var(--ss-bg-surface); --t-color-background-content: var(--ss-bg-surface); --t-color-background-page-title: var(--ss-bg-surface);
+      --t-color-background-menu: var(--ss-bg-raised); --t-color-background-menu-item-rest: var(--ss-bg-raised); --t-color-background-dropdown-primary: var(--ss-bg-raised);
+      --t-color-background-dialog: var(--ss-bg-raised); --t-color-background-drawer: var(--ss-bg-raised); --t-color-background-drawer-elevated: var(--ss-bg-raised);
+      --t-color-background-text-input: var(--ss-bg-surface); --t-color-background-select: var(--ss-bg-surface); --t-color-background-datepicker: var(--ss-bg-raised);
+      --t-color-background-menu-item-hover: var(--ss-bg-hover); --t-color-background-tab-hover: var(--ss-bg-hover); --t-color-background-hover-row-ag-grid: var(--ss-bg-hover);
+      --t-color-background-row-selected-ag-grid: var(--ss-bg-selected); --t-color-background-secondary-nav-item-active: var(--ss-bg-selected); --t-color-background-brand: var(--ss-bg-selected);
+      --t-color-background-ag-grid: var(--ss-bg-surface); --t-color-background-header-ag-grid: var(--ss-bg-page); --t-color-background-subheader-ag-grid: var(--ss-bg-surface);
+      --t-color-background-toolbar-subheader-ag-grid: var(--ss-bg-page); --t-color-background-control-panel-ag-grid: var(--ss-bg-page); --t-color-background-paging-panel-ag-grid: var(--ss-bg-page);
+      --t-color-background-tab-unselected: var(--ss-bg-surface);
       /* Header (inverse) */
-      --t-color-background-header: var(--fall-inverse-bg); --t-color-background-logo-badge: var(--fall-inverse-bg);
-      --t-color-background-nav-item-active: var(--fall-inverse-accent); --t-color-background-nav-item-active-hover: var(--fall-inverse-accent);
-      --t-color-text-nav-item-active: var(--fall-inverse-bg); --t-color-text-nav-item-active-hover: var(--fall-inverse-bg);
-      --t-color-text-nav-item-rest: var(--fall-inverse-text); --t-color-text-nav-item-hover: var(--fall-inverse-accent); --t-color-background-nav-item-hover: rgb(255 255 255 / 10%);
+      --t-color-background-header: var(--ss-inverse-bg); --t-color-background-logo-badge: var(--ss-inverse-bg);
+      --t-color-background-nav-item-active: var(--ss-inverse-accent); --t-color-background-nav-item-active-hover: var(--ss-inverse-accent);
+      --t-color-text-nav-item-active: var(--ss-inverse-bg); --t-color-text-nav-item-active-hover: var(--ss-inverse-bg);
+      --t-color-text-nav-item-rest: var(--ss-inverse-text); --t-color-text-nav-item-hover: var(--ss-inverse-accent); --t-color-background-nav-item-hover: rgb(255 255 255 / 10%);
       /* Accent: buttons and key highlights */
-      --t-color-background-button-primary-rest: var(--fall-accent); --t-color-background-button-primary-hover: var(--fall-accent-hover); --t-color-background-button-primary-active: var(--fall-accent-hover);
-      --t-color-background-button-primary-disabled: var(--fall-text-disabled);
-      --t-color-border-button-primary-rest: var(--fall-accent); --t-color-border-button-primary-hover: var(--fall-accent-hover); --t-color-border-button-primary-active: var(--fall-accent-hover);
-      --t-color-text-button-primary-rest: var(--fall-on-accent); --t-color-text-button-primary-hover: var(--fall-on-accent); --t-color-text-button-primary-active: var(--fall-on-accent);
-      --t-color-text-button-secondary-rest: var(--fall-accent); --t-color-text-button-secondary-hover: var(--fall-accent-hover); --t-color-text-button-secondary-active: var(--fall-accent-hover);
-      --t-color-border-button-secondary-rest: var(--fall-border-strong); --t-color-border-button-secondary-hover: var(--fall-accent); --t-color-border-button-secondary-active: var(--fall-accent-hover);
-      --t-color-background-button-secondary-hover: var(--fall-bg-hover);
-      --t-color-text-button-inline-colored-rest: var(--fall-accent); --t-color-text-button-inline-colored-hover: var(--fall-accent-hover); --t-color-text-button-inline-colored-active: var(--fall-accent-hover);
-      --t-color-background-control-active: var(--fall-accent); --t-color-background-control-active-hover: var(--fall-accent-hover); --t-color-background-control-active-disabled: var(--fall-text-disabled);
-      --t-color-background-toggle-active: var(--fall-accent); --t-color-background-toggle-active-hover: var(--fall-accent-hover); --t-color-background-toggle-active-disabled: var(--fall-text-disabled);
-      --t-color-background-checkbox: var(--fall-accent); --t-color-background-checkbox-hover: var(--fall-accent-hover);
-      --t-color-background-tab-selected: var(--fall-accent); --t-color-border-tab-selected: var(--fall-accent); --t-color-border-underline-tab-selected-ag-grid: var(--fall-accent);
-      --t-color-background-datepicker-selected: var(--fall-accent); --t-color-background-datepicker-selected-hover: var(--fall-accent-hover); --t-color-background-datepicker-hover: var(--fall-bg-selected);
-      --t-color-background-timepicker-selected: var(--fall-accent); --t-color-background-timepicker-selected-hover: var(--fall-accent-hover); --t-color-background-dropdown-secondary: var(--fall-accent);
-      --t-color-border-datepicker-hover: var(--fall-accent); --t-color-border-datepicker-selected-hover: var(--fall-accent-hover); --t-color-border-select-open: var(--fall-accent);
-      --t-color-border-range-selection-ag-grid: var(--fall-accent); --t-color-text-cell-icon-focused-ag-grid: var(--fall-accent); --t-color-border-selected-theme-switcher: var(--fall-accent);
-      --t-color-text-link-rest: var(--fall-accent); --t-color-text-link-visited: var(--fall-accent); --t-color-text-link-hover: var(--fall-accent-hover); --t-color-text-link-active: var(--fall-accent-hover);
-      --t-color-text-link-disabled: var(--fall-text-disabled);
-      --t-color-text-brand: var(--fall-accent); --t-color-border-brand: var(--fall-accent); --t-color-text-tab-selected: var(--fall-accent); --t-color-text-secondary-nav-item-active: var(--fall-accent-hover);
+      --t-color-background-button-primary-rest: var(--ss-accent); --t-color-background-button-primary-hover: var(--ss-accent-hover); --t-color-background-button-primary-active: var(--ss-accent-hover);
+      --t-color-background-button-primary-disabled: var(--ss-text-disabled);
+      --t-color-border-button-primary-rest: var(--ss-accent); --t-color-border-button-primary-hover: var(--ss-accent-hover); --t-color-border-button-primary-active: var(--ss-accent-hover);
+      --t-color-text-button-primary-rest: var(--ss-on-accent); --t-color-text-button-primary-hover: var(--ss-on-accent); --t-color-text-button-primary-active: var(--ss-on-accent);
+      --t-color-text-button-secondary-rest: var(--ss-accent); --t-color-text-button-secondary-hover: var(--ss-accent-hover); --t-color-text-button-secondary-active: var(--ss-accent-hover);
+      --t-color-border-button-secondary-rest: var(--ss-border-strong); --t-color-border-button-secondary-hover: var(--ss-accent); --t-color-border-button-secondary-active: var(--ss-accent-hover);
+      --t-color-background-button-secondary-hover: var(--ss-bg-hover);
+      --t-color-text-button-inline-colored-rest: var(--ss-accent); --t-color-text-button-inline-colored-hover: var(--ss-accent-hover); --t-color-text-button-inline-colored-active: var(--ss-accent-hover);
+      --t-color-background-control-active: var(--ss-accent); --t-color-background-control-active-hover: var(--ss-accent-hover); --t-color-background-control-active-disabled: var(--ss-text-disabled);
+      --t-color-background-toggle-active: var(--ss-accent); --t-color-background-toggle-active-hover: var(--ss-accent-hover); --t-color-background-toggle-active-disabled: var(--ss-text-disabled);
+      --t-color-background-checkbox: var(--ss-accent); --t-color-background-checkbox-hover: var(--ss-accent-hover);
+      --t-color-background-tab-selected: var(--ss-accent); --t-color-border-tab-selected: var(--ss-accent); --t-color-border-underline-tab-selected-ag-grid: var(--ss-accent);
+      --t-color-background-datepicker-selected: var(--ss-accent); --t-color-background-datepicker-selected-hover: var(--ss-accent-hover); --t-color-background-datepicker-hover: var(--ss-bg-selected);
+      --t-color-background-timepicker-selected: var(--ss-accent); --t-color-background-timepicker-selected-hover: var(--ss-accent-hover); --t-color-background-dropdown-secondary: var(--ss-accent);
+      --t-color-border-datepicker-hover: var(--ss-accent); --t-color-border-datepicker-selected-hover: var(--ss-accent-hover); --t-color-border-select-open: var(--ss-accent);
+      --t-color-border-range-selection-ag-grid: var(--ss-accent); --t-color-text-cell-icon-focused-ag-grid: var(--ss-accent); --t-color-border-selected-theme-switcher: var(--ss-accent);
+      --t-color-text-link-rest: var(--ss-accent); --t-color-text-link-visited: var(--ss-accent); --t-color-text-link-hover: var(--ss-accent-hover); --t-color-text-link-active: var(--ss-accent-hover);
+      --t-color-text-link-disabled: var(--ss-text-disabled);
+      --t-color-text-brand: var(--ss-accent); --t-color-border-brand: var(--ss-accent); --t-color-text-tab-selected: var(--ss-accent); --t-color-text-secondary-nav-item-active: var(--ss-accent-hover);
       /* Focus */
-      --t-color-border-text-input-focused: var(--fall-focus); --t-color-font-text-input-icon-focus: var(--fall-focus); --t-color-border-text-input-readonly-focused: var(--fall-border-strong);
-      --t-color-border-toggle-focused-halo: var(--fall-focus); --t-color-border-checkbox-focused-halo: var(--fall-focus); --t-color-border-segmented-control-focused-halo: var(--fall-focus);
-      --t-color-border-primary-nav-item-focused-halo: var(--fall-inverse-accent);
+      --t-color-border-text-input-focused: var(--ss-focus); --t-color-font-text-input-icon-focus: var(--ss-focus); --t-color-border-text-input-readonly-focused: var(--ss-border-strong);
+      --t-color-border-toggle-focused-halo: var(--ss-focus); --t-color-border-checkbox-focused-halo: var(--ss-focus); --t-color-border-segmented-control-focused-halo: var(--ss-focus);
+      --t-color-border-primary-nav-item-focused-halo: var(--ss-inverse-accent);
       /* Borders */
-      --t-color-border-primary: var(--fall-border); --t-color-border-secondary: var(--fall-border); --t-color-border-tertiary: var(--fall-border-strong);
-      --t-color-border-ag-grid: var(--fall-border); --t-color-border-secondary-ag-grid: var(--fall-border); --t-color-border-drawer: var(--fall-border); --t-color-border-page-title: var(--fall-border);
-      --t-color-border-text-input-unfocused: var(--fall-border-strong); --t-color-border-select-closed: var(--fall-border-strong);
+      --t-color-border-primary: var(--ss-border); --t-color-border-secondary: var(--ss-border); --t-color-border-tertiary: var(--ss-border-strong);
+      --t-color-border-ag-grid: var(--ss-border); --t-color-border-secondary-ag-grid: var(--ss-border); --t-color-border-drawer: var(--ss-border); --t-color-border-page-title: var(--ss-border);
+      --t-color-border-text-input-unfocused: var(--ss-border-strong); --t-color-border-select-closed: var(--ss-border-strong);
       /* Text */
-      --t-color-text-primary: var(--fall-text); --t-color-text-secondary: var(--fall-text-secondary); --t-color-text-tertiary: var(--fall-text-faint); --t-color-text-disabled: var(--fall-text-disabled);
-      --t-color-text-icon: var(--fall-text-secondary); --t-color-text-tab-unselected: var(--fall-text-secondary); --t-color-text-tab-hover: var(--fall-text);
+      --t-color-text-primary: var(--ss-text); --t-color-text-secondary: var(--ss-text-secondary); --t-color-text-tertiary: var(--ss-text-faint); --t-color-text-disabled: var(--ss-text-disabled);
+      --t-color-text-icon: var(--ss-text-secondary); --t-color-text-tab-unselected: var(--ss-text-secondary); --t-color-text-tab-hover: var(--ss-text);
       /* Status */
-      --t-color-text-success: var(--fall-success); --t-color-icon-alert-success: var(--fall-success); --t-color-icon-snackbar-success: var(--fall-success);
-      --t-color-background-alert-success: var(--fall-success-bg); --t-color-border-alert-success: var(--fall-success);
-      --t-color-text-warning: var(--fall-warning); --t-color-icon-alert-warning: var(--fall-warning); --t-color-icon-snackbar-warning: var(--fall-warning);
-      --t-color-background-alert-warning: var(--fall-warning-bg); --t-color-border-alert-warning: var(--fall-warning);
-      --t-color-text-error: var(--fall-danger); --t-color-icon-alert-danger: var(--fall-danger); --t-color-icon-snackbar-danger: var(--fall-danger);
-      --t-color-background-alert-danger: var(--fall-danger-bg); --t-color-border-alert-danger: var(--fall-danger);
-      background: var(--fall-bg-page);
+      --t-color-text-success: var(--ss-success); --t-color-icon-alert-success: var(--ss-success); --t-color-icon-snackbar-success: var(--ss-success);
+      --t-color-background-alert-success: var(--ss-success-bg); --t-color-border-alert-success: var(--ss-success);
+      --t-color-text-warning: var(--ss-warning); --t-color-icon-alert-warning: var(--ss-warning); --t-color-icon-snackbar-warning: var(--ss-warning);
+      --t-color-background-alert-warning: var(--ss-warning-bg); --t-color-border-alert-warning: var(--ss-warning);
+      --t-color-text-error: var(--ss-danger); --t-color-icon-alert-danger: var(--ss-danger); --t-color-icon-snackbar-danger: var(--ss-danger);
+      --t-color-background-alert-danger: var(--ss-danger-bg); --t-color-border-alert-danger: var(--ss-danger);
+      background: var(--ss-bg-page);
     }
-    html.pd9-season-fall, html.pd9-season-fall body { background: var(--fall-bg-page) !important; color: var(--fall-text); }
-    html.pd9-season-fall .fvs-primary-nav-item a .mdis { --icon-color: currentColor !important; color: inherit !important; }
-    html.pd9-season-fall .fvs-primary-nav-item--active a { color: var(--fall-inverse-bg) !important; }
-    /* A little jack-o'-lantern after the Filevine logo, in the logo's own color */
-    html.pd9-season-fall a[data-testid="app-header-logo-link"] { display: inline-flex; align-items: center; gap: 7px; }
-    html.pd9-season-fall a[data-testid="app-header-logo-link"]::after { content: ""; width: 22px; height: 22px; flex: none; background-color: var(--t-color-logo, #fff);
-      -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cdefs%3E%3Cmask id='m'%3E%3Crect width='24' height='24' fill='%23fff'/%3E%3Cpath d='M6.2 12.4h3.8L8.1 9.1z M14 12.4h3.8l-1.9-3.3z M11 14.6h2l-1-1.7z' fill='%23000'/%3E%3Cpath d='M5.6 15.6Q12 22 18.4 15.6l-1.7.8-1 1.4-1.2-1.1-1.3 1.5-1.2-1.3-1.2 1.3-1.3-1.5-1.2 1.1-1-1.4z' fill='%23000'/%3E%3C/mask%3E%3C/defs%3E%3Cg mask='url(%23m)' fill='%23fff'%3E%3Cellipse cx='7.6' cy='14.6' rx='5.6' ry='7.4'/%3E%3Cellipse cx='16.4' cy='14.6' rx='5.6' ry='7.4'/%3E%3Cellipse cx='12' cy='14.6' rx='6.2' ry='8'/%3E%3Cpath d='M11.1 7.4l.5-4.4q.2-1 1.2-.7l.9.3-.8 4.8z'/%3E%3C/g%3E%3C/svg%3E") center / contain no-repeat; mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cdefs%3E%3Cmask id='m'%3E%3Crect width='24' height='24' fill='%23fff'/%3E%3Cpath d='M6.2 12.4h3.8L8.1 9.1z M14 12.4h3.8l-1.9-3.3z M11 14.6h2l-1-1.7z' fill='%23000'/%3E%3Cpath d='M5.6 15.6Q12 22 18.4 15.6l-1.7.8-1 1.4-1.2-1.1-1.3 1.5-1.2-1.3-1.2 1.3-1.3-1.5-1.2 1.1-1-1.4z' fill='%23000'/%3E%3C/mask%3E%3C/defs%3E%3Cg mask='url(%23m)' fill='%23fff'%3E%3Cellipse cx='7.6' cy='14.6' rx='5.6' ry='7.4'/%3E%3Cellipse cx='16.4' cy='14.6' rx='5.6' ry='7.4'/%3E%3Cellipse cx='12' cy='14.6' rx='6.2' ry='8'/%3E%3Cpath d='M11.1 7.4l.5-4.4q.2-1 1.2-.7l.9.3-.8 4.8z'/%3E%3C/g%3E%3C/svg%3E") center / contain no-repeat; }
-    html.pd9-season-fall ::selection { background: var(--fall-bg-selected); }
-    html.pd9-season-fall ::placeholder { color: var(--fall-text-faint); }
-    html.pd9-season-fall .btn-primary { background-color: var(--fall-accent) !important; border-color: var(--fall-accent) !important; color: var(--fall-on-accent) !important; }
-    html.pd9-season-fall .btn-primary:hover, html.pd9-season-fall .btn-primary:focus { background-color: var(--fall-accent-hover) !important; border-color: var(--fall-accent-hover) !important; }
-    html.pd9-season-fall .text-danger { color: var(--fall-danger) !important; }
-    html.pd9-season-fall .text-success { color: var(--fall-success) !important; }
-    html.pd9-season-fall .text-warning { color: var(--fall-warning) !important; }
+    html.pd9-season, html.pd9-season body { background: var(--ss-bg-page) !important; color: var(--ss-text); }
+    html.pd9-season .fvs-primary-nav-item a .mdis { --icon-color: currentColor !important; color: inherit !important; }
+    html.pd9-season .fvs-primary-nav-item--active a { color: var(--ss-inverse-bg) !important; }
+    /* A little mark after the Filevine logo, in the logo's own color (fall: jack-o'-lantern, winter: snowflake) */
+    html.pd9-season a[data-testid="app-header-logo-link"] { display: inline-flex; align-items: center; gap: 7px; }
+    html.pd9-season a[data-testid="app-header-logo-link"]::after { content: ""; width: 22px; height: 22px; flex: none; background-color: var(--t-color-logo, #fff);
+      -webkit-mask: var(--ss-logo-mark) center / contain no-repeat; mask: var(--ss-logo-mark) center / contain no-repeat; }
+    html.pd9-season ::selection { background: var(--ss-bg-selected); }
+    html.pd9-season ::placeholder { color: var(--ss-text-faint); }
+    html.pd9-season .btn-primary { background-color: var(--ss-accent) !important; border-color: var(--ss-accent) !important; color: var(--ss-on-accent) !important; }
+    html.pd9-season .btn-primary:hover, html.pd9-season .btn-primary:focus { background-color: var(--ss-accent-hover) !important; border-color: var(--ss-accent-hover) !important; }
+    html.pd9-season .text-danger { color: var(--ss-danger) !important; }
+    html.pd9-season .text-success { color: var(--ss-success) !important; }
+    html.pd9-season .text-warning { color: var(--ss-warning) !important; }
     /* The Improver's own parts */
-    html.pd9-season-fall .pd9-overlay .pd9-primary, html.pd9-season-fall .pd9-panel .pd9-primary, html.pd9-season-fall #pd9-case .pd9-primary, html.pd9-season-fall #pd9-adv .pd9-primary,
-    html.pd9-season-fall .pd9-wn-ok { background: var(--fall-accent) !important; border-color: var(--fall-accent) !important; color: var(--fall-on-accent) !important; }
-    html.pd9-season-fall .pd9-overlay .pd9-primary:hover, html.pd9-season-fall .pd9-wn-ok:hover { background: var(--fall-accent-hover) !important; border-color: var(--fall-accent-hover) !important; }
-    html.pd9-season-fall .pd9-dialog, html.pd9-season-fall #pd9-case, html.pd9-season-fall #pd9-whatsnew { background: var(--fall-bg-raised); color: var(--fall-text); border-color: var(--fall-border); }
-    html.pd9-season-fall #pd9-hub-sorted { --ink: var(--fall-text); --slate: var(--fall-text-secondary); --line: var(--fall-border); --head: var(--fall-bg-page); --accent: var(--fall-accent); --soon: var(--fall-soon); background: var(--fall-bg-surface); }
-    html.pd9-season-fall #pd9-hub-sorted td a { color: var(--fall-accent); }
-    html.pd9-season-fall #pd9-hub-sorted tbody tr:hover td { background: var(--fall-bg-hover); }
-    html.pd9-season-fall #pd9-hub-sorted, html.pd9-season-fall #pd9-casepanel, html.pd9-season-fall .pd9-leftpane { border-color: var(--fall-border); }
-    html.pd9-season-fall .pd9-cp-head { background: var(--fall-bg-page); border-color: var(--fall-border); color: var(--fall-text); }
-    html.pd9-season-fall .pd9-cp-btn { color: var(--fall-text-secondary); }
-    html.pd9-season-fall .pd9-cp-btn:hover { background: var(--fall-bg-hover); color: var(--fall-text); }
-    html.pd9-season-fall #pd9-hub-sorted tr.pd9-row-open td { background: var(--fall-bg-selected) !important; }
-    html.pd9-season-fall #pd9-hub-sorted tr.pd9-row-open td:nth-child(2) { box-shadow: inset 3px 0 0 var(--fall-accent); }
-    html.pd9-season-fall #pd9-stac-find .pd9-sf-row { border-color: var(--fall-border-strong); color: var(--fall-text-faint); }
-    html.pd9-season-fall #pd9-stac-find .pd9-sf-row:focus-within { border-color: var(--fall-focus); box-shadow: 0 0 0 3px rgb(46 59 51 / 15%); }
-    html.pd9-season-fall #pd9-stac-find .pd9-sf-hint, html.pd9-season-fall #pd9-stac-find .pd9-case-details { color: var(--fall-text-secondary); }
-    html.pd9-season-fall #pd9-stac-find .pd9-case-list a:hover, html.pd9-season-fall #pd9-case .pd9-case-list a:hover { background: var(--fall-bg-hover); }
-    html.pd9-season-fall #pd9-stac-find .pd9-case-title, html.pd9-season-fall #pd9-case .pd9-case-title { color: var(--fall-accent); }
-    html.pd9-season-fall .activity-item-component.pd9-feed-picked { box-shadow: inset 0 0 0 2px var(--fall-accent); background: var(--fall-bg-selected) !important; }
-    html.pd9-season-fall #pd9-feedbar { background: var(--fall-inverse-bg); color: var(--fall-inverse-text); }
-    html.pd9-season-fall #pd9-feedbar button { background: rgb(255 255 255 / 12%); }
-    html.pd9-season-fall #pd9-feedbar button:hover { background: rgb(255 255 255 / 20%); }
-    html.pd9-season-fall #pd9-feedbar .pd9-fb-got { background: var(--fall-inverse-accent); color: var(--fall-inverse-bg); }
-    html.pd9-season-fall #pd9-feedbar .pd9-fb-got:hover { background: #FFFFFF; }
-    html.pd9-season-fall #pd9-whatsnew li.pd9-wn-top { background: var(--fall-bg-selected); border-left-color: var(--fall-accent); }
-    html.pd9-season-fall #pd9-whatsnew .pd9-wn-ver, html.pd9-season-fall #pd9-whatsnew .pd9-wn-x { color: var(--fall-text-faint); }
+    html.pd9-season .pd9-overlay .pd9-primary, html.pd9-season .pd9-panel .pd9-primary, html.pd9-season #pd9-case .pd9-primary, html.pd9-season #pd9-adv .pd9-primary,
+    html.pd9-season .pd9-wn-ok { background: var(--ss-accent) !important; border-color: var(--ss-accent) !important; color: var(--ss-on-accent) !important; }
+    html.pd9-season .pd9-overlay .pd9-primary:hover, html.pd9-season .pd9-wn-ok:hover { background: var(--ss-accent-hover) !important; border-color: var(--ss-accent-hover) !important; }
+    html.pd9-season .pd9-dialog, html.pd9-season #pd9-case, html.pd9-season #pd9-whatsnew { background: var(--ss-bg-raised); color: var(--ss-text); border-color: var(--ss-border); }
+    html.pd9-season #pd9-hub-sorted { --ink: var(--ss-text); --slate: var(--ss-text-secondary); --line: var(--ss-border); --head: var(--ss-bg-page); --accent: var(--ss-accent); --soon: var(--ss-soon); background: var(--ss-bg-surface); }
+    html.pd9-season #pd9-hub-sorted td a { color: var(--ss-accent); }
+    html.pd9-season #pd9-hub-sorted tbody tr:hover td { background: var(--ss-bg-hover); }
+    html.pd9-season #pd9-hub-sorted, html.pd9-season #pd9-casepanel, html.pd9-season .pd9-leftpane { border-color: var(--ss-border); }
+    html.pd9-season .pd9-cp-head { background: var(--ss-bg-page); border-color: var(--ss-border); color: var(--ss-text); }
+    html.pd9-season .pd9-cp-btn { color: var(--ss-text-secondary); }
+    html.pd9-season .pd9-cp-btn:hover { background: var(--ss-bg-hover); color: var(--ss-text); }
+    html.pd9-season #pd9-hub-sorted tr.pd9-row-open td { background: var(--ss-bg-selected) !important; }
+    html.pd9-season #pd9-hub-sorted tr.pd9-row-open td:nth-child(2) { box-shadow: inset 3px 0 0 var(--ss-accent); }
+    html.pd9-season #pd9-stac-find .pd9-sf-row { border-color: var(--ss-border-strong); color: var(--ss-text-faint); }
+    html.pd9-season #pd9-stac-find .pd9-sf-row:focus-within { border-color: var(--ss-focus); box-shadow: 0 0 0 3px color-mix(in srgb, var(--ss-focus) 18%, transparent); }
+    html.pd9-season #pd9-stac-find .pd9-sf-hint, html.pd9-season #pd9-stac-find .pd9-case-details { color: var(--ss-text-secondary); }
+    html.pd9-season #pd9-stac-find .pd9-case-list a:hover, html.pd9-season #pd9-case .pd9-case-list a:hover { background: var(--ss-bg-hover); }
+    html.pd9-season #pd9-stac-find .pd9-case-title, html.pd9-season #pd9-case .pd9-case-title { color: var(--ss-accent); }
+    html.pd9-season .activity-item-component.pd9-feed-picked { box-shadow: inset 0 0 0 2px var(--ss-accent); background: var(--ss-bg-selected) !important; }
+    html.pd9-season #pd9-feedbar { background: var(--ss-inverse-bg); color: var(--ss-inverse-text); }
+    html.pd9-season #pd9-feedbar button { background: rgb(255 255 255 / 12%); }
+    html.pd9-season #pd9-feedbar button:hover { background: rgb(255 255 255 / 20%); }
+    html.pd9-season #pd9-feedbar .pd9-fb-got { background: var(--ss-inverse-accent); color: var(--ss-inverse-bg); }
+    html.pd9-season #pd9-feedbar .pd9-fb-got:hover { background: #FFFFFF; }
+    html.pd9-season #pd9-whatsnew li.pd9-wn-top { background: var(--ss-bg-selected); border-left-color: var(--ss-accent); }
+    html.pd9-season #pd9-whatsnew .pd9-wn-ver, html.pd9-season #pd9-whatsnew .pd9-wn-x { color: var(--ss-text-faint); }
     /* Name bubbles: the five fall bubble colors, white letters */
-    html.pd9-season-fall .fvs-avatar.fvs-avatar--color-1, html.pd9-season-fall #pd9-hub-sorted .pd9-av[data-c="1"] { background-color: var(--fall-b1) !important; }
-    html.pd9-season-fall .fvs-avatar.fvs-avatar--color-2, html.pd9-season-fall #pd9-hub-sorted .pd9-av[data-c="2"] { background-color: var(--fall-b2) !important; }
-    html.pd9-season-fall .fvs-avatar.fvs-avatar--color-3, html.pd9-season-fall #pd9-hub-sorted .pd9-av[data-c="3"] { background-color: var(--fall-b3) !important; }
-    html.pd9-season-fall .fvs-avatar.fvs-avatar--color-4, html.pd9-season-fall #pd9-hub-sorted .pd9-av[data-c="4"] { background-color: var(--fall-b4) !important; }
-    html.pd9-season-fall .fvs-avatar.fvs-avatar--color-5, html.pd9-season-fall #pd9-hub-sorted .pd9-av[data-c="5"] { background-color: var(--fall-b5) !important; }
-    html.pd9-season-fall .fvs-avatar.fvs-avatar--color-6, html.pd9-season-fall #pd9-hub-sorted .pd9-av[data-c="6"] { background-color: var(--fall-b1) !important; }
-    html.pd9-season-fall .fvs-avatar.fvs-avatar--color-7, html.pd9-season-fall #pd9-hub-sorted .pd9-av[data-c="7"] { background-color: var(--fall-b2) !important; }
-    html.pd9-season-fall .fvs-avatar.fvs-avatar--color-8, html.pd9-season-fall #pd9-hub-sorted .pd9-av[data-c="8"] { background-color: var(--fall-b3) !important; }
-    html.pd9-season-fall .fvs-avatar.fvs-avatar--color-9, html.pd9-season-fall #pd9-hub-sorted .pd9-av[data-c="9"] { background-color: var(--fall-b4) !important; }
-    html.pd9-season-fall .fvs-avatar.fvs-avatar--color-10, html.pd9-season-fall #pd9-hub-sorted .pd9-av[data-c="10"] { background-color: var(--fall-b5) !important; }
-    html.pd9-season-fall .fvs-avatar.fvs-avatar--color-11, html.pd9-season-fall #pd9-hub-sorted .pd9-av[data-c="11"] { background-color: var(--fall-b1) !important; }
-    html.pd9-season-fall .fvs-avatar.fvs-avatar--color-12, html.pd9-season-fall #pd9-hub-sorted .pd9-av[data-c="12"] { background-color: var(--fall-b2) !important; }
-    html.pd9-season-fall .fvs-avatar.fvs-avatar--color-13, html.pd9-season-fall #pd9-hub-sorted .pd9-av[data-c="13"] { background-color: var(--fall-b3) !important; }
-    html.pd9-season-fall .fvs-avatar.fvs-avatar--color-14, html.pd9-season-fall #pd9-hub-sorted .pd9-av[data-c="14"] { background-color: var(--fall-b4) !important; }
-    html.pd9-season-fall .fvs-avatar.fvs-avatar--color-15, html.pd9-season-fall #pd9-hub-sorted .pd9-av[data-c="15"] { background-color: var(--fall-b5) !important; }
-    html.pd9-season-fall .fvs-avatar.fvs-avatar--color-16, html.pd9-season-fall #pd9-hub-sorted .pd9-av[data-c="16"] { background-color: var(--fall-b1) !important; }
-    html.pd9-season-fall .fvs-avatar .name-layer, html.pd9-season-fall #pd9-hub-sorted .pd9-av { color: #FFFFFF !important; }
+    html.pd9-season .fvs-avatar.fvs-avatar--color-1, html.pd9-season #pd9-hub-sorted .pd9-av[data-c="1"] { background-color: var(--ss-b1) !important; }
+    html.pd9-season .fvs-avatar.fvs-avatar--color-2, html.pd9-season #pd9-hub-sorted .pd9-av[data-c="2"] { background-color: var(--ss-b2) !important; }
+    html.pd9-season .fvs-avatar.fvs-avatar--color-3, html.pd9-season #pd9-hub-sorted .pd9-av[data-c="3"] { background-color: var(--ss-b3) !important; }
+    html.pd9-season .fvs-avatar.fvs-avatar--color-4, html.pd9-season #pd9-hub-sorted .pd9-av[data-c="4"] { background-color: var(--ss-b4) !important; }
+    html.pd9-season .fvs-avatar.fvs-avatar--color-5, html.pd9-season #pd9-hub-sorted .pd9-av[data-c="5"] { background-color: var(--ss-b5) !important; }
+    html.pd9-season .fvs-avatar.fvs-avatar--color-6, html.pd9-season #pd9-hub-sorted .pd9-av[data-c="6"] { background-color: var(--ss-b1) !important; }
+    html.pd9-season .fvs-avatar.fvs-avatar--color-7, html.pd9-season #pd9-hub-sorted .pd9-av[data-c="7"] { background-color: var(--ss-b2) !important; }
+    html.pd9-season .fvs-avatar.fvs-avatar--color-8, html.pd9-season #pd9-hub-sorted .pd9-av[data-c="8"] { background-color: var(--ss-b3) !important; }
+    html.pd9-season .fvs-avatar.fvs-avatar--color-9, html.pd9-season #pd9-hub-sorted .pd9-av[data-c="9"] { background-color: var(--ss-b4) !important; }
+    html.pd9-season .fvs-avatar.fvs-avatar--color-10, html.pd9-season #pd9-hub-sorted .pd9-av[data-c="10"] { background-color: var(--ss-b5) !important; }
+    html.pd9-season .fvs-avatar.fvs-avatar--color-11, html.pd9-season #pd9-hub-sorted .pd9-av[data-c="11"] { background-color: var(--ss-b1) !important; }
+    html.pd9-season .fvs-avatar.fvs-avatar--color-12, html.pd9-season #pd9-hub-sorted .pd9-av[data-c="12"] { background-color: var(--ss-b2) !important; }
+    html.pd9-season .fvs-avatar.fvs-avatar--color-13, html.pd9-season #pd9-hub-sorted .pd9-av[data-c="13"] { background-color: var(--ss-b3) !important; }
+    html.pd9-season .fvs-avatar.fvs-avatar--color-14, html.pd9-season #pd9-hub-sorted .pd9-av[data-c="14"] { background-color: var(--ss-b4) !important; }
+    html.pd9-season .fvs-avatar.fvs-avatar--color-15, html.pd9-season #pd9-hub-sorted .pd9-av[data-c="15"] { background-color: var(--ss-b5) !important; }
+    html.pd9-season .fvs-avatar.fvs-avatar--color-16, html.pd9-season #pd9-hub-sorted .pd9-av[data-c="16"] { background-color: var(--ss-b1) !important; }
+    html.pd9-season .fvs-avatar .name-layer, html.pd9-season #pd9-hub-sorted .pd9-av { color: #FFFFFF !important; }
     /* ---------- Dark mode ----------
        Palette: canvas #0d0f13, surface #15181d, raised #1b1f25, hover #222730,
        line #262b33, line strong #343a44, text #e6e8ec, muted #a3aab6, faint #737b88, teal #2fbfae. */
