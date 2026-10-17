@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PD9 Filevine Improver
 // @namespace    https://filevine.local/pd9-improver
-// @version      3.105.2
+// @version      3.107.3
 // @description  Faster notes, tasks, and case closing in Filevine for PD9.
 // @match        https://*.filevine.com/*
 // @match        https://*.filevineapp.com/*
@@ -39,6 +39,10 @@
   // It never touches a captcha, and it never searches a second time.
   const BENCHMARK_PENDING = 'pd9-benchmark-pending';
   if (location.hostname === 'courts.osceolaclerk.com') {
+    // The Benchmark button reuses this tab. When it sends a new case while we
+    // are already on the search page, only the #pd9case part changes, so load
+    // the page again to run the new search.
+    window.addEventListener('hashchange', () => { if (/pd9case=/.test(location.hash)) location.reload(); });
     // The Clerk's site replaces Date.now() with one that returns a date object,
     // so get the time a way it can't change.
     const now = () => new Date().getTime();
@@ -865,7 +869,7 @@
   // Warn if the floating box is set to a different case than the one on screen.
   function currentCaseName() {
     if (!inCase()) return '';
-    return document.title.replace(/\s*\|\s*Filevine\s*$/i, '').trim();
+    return pageTitle().replace(/\s*\|\s*Filevine\s*$/i, '').trim();
   }
   function updateWarning(form) {
     const warn = $('.fvqn-warn', form);
@@ -906,6 +910,12 @@
   // Newest first. "v" is the Improver version that brought it; "staff" is the Staff
   // version. Leave one out to hide the item from that script.
   const WHATS_NEW = [
+    { v: '3.107.3', items: [
+      'Stac view: works like the old STAC layout. Click a case in the PD9 table and it opens on the right, while your case list stays on the left. At the top of the list, one search box filters your cases as you type. Press Enter to also search all of Filevine by name or case number. Esc or \u00D7 closes the case. Turn it off with the "Stac mode" box next to "Window mode".',
+      'In Stac view, Switch case opens the case on the right too. Tasks, Feed and Documents at the top open in a new tab, and Project Hub closes the case.',
+      'Benchmark now reuses the same Clerk tab each time. Ctrl click or middle click it to get a new tab.',
+      'The browser tab now shows the short case number, like "Filevine | 25-CF-3158".',
+    ] },
     // One list for everything new (October 13 and 14, 2026), so everyone sees it all together.
     { v: '3.105.1', items: [
       'Intake tab: a Today button next to Today\u2019s Date, and a File Review template button next to Incident Details.',
@@ -1050,6 +1060,7 @@
     dark.title = 'Alt+Shift+D';
     dark.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); toggleDark(); }, true);
     mine.after(dark);
+
   }
 
   const escapeAttr = (t) => String(t).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;');
@@ -1844,6 +1855,7 @@
       if (e.button !== 0 || e.ctrlKey || e.metaKey || e.shiftKey || e.altKey) return;
       e.preventDefault();
       if (onOpen) onOpen();
+      if (!IN_FRAME && stacActive()) { stacOpenCase(id, title); rememberRecent(id); return; }
       if (!IN_FRAME && windowMode() && onHub()) openCaseWindow(String(id), title || `Case ${id}`);
       else if (!IN_FRAME && onHub()) window.open(`${location.origin}${location.pathname}#/project/${encodeURIComponent(id)}/activity`, CASE_TAB);
       else location.hash = `#/project/${encodeURIComponent(id)}/activity`;
@@ -1902,7 +1914,7 @@
       a.append(t, d);
       if (h.mine) li.classList.add('pd9-hit-mine');
       // Plain click: open it the fast way and close. Ctrl/Cmd/middle-click opens a new tab as usual.
-      wireCaseLink(a, h.id, `${(h.title.split('|')[1] || '').trim()}  ${(h.title.split('|')[0] || '').trim()}`.trim(), () => setTimeout(() => panel.remove(), 0));
+      wireCaseLink(a, h.id, `${(h.title.split('|')[1] || '').trim()}  ${(h.title.split('|')[0] || '').trim()}`.trim(), () => setTimeout(() => { if (!panel.dataset.keep) panel.remove(); }, 0));
       li.appendChild(a);
       list.appendChild(li);
     }
@@ -1918,7 +1930,7 @@
 
     const started = Date.now();
     const mode = m === SEARCH_MODES.case ? 'case' : 'name';
-    const mine = myCaseHits(entry, mode);
+    const mine = panel.dataset.keep ? [] : myCaseHits(entry, mode);
     out.innerHTML = '<div class="pd9-case-status"><span class="pd9-spin" aria-hidden="true"></span><span class="pd9-case-wait">Searching, including archived...</span></div>';
     if (mine.length) drawHitList(out, mine, panel, 'Your cases (instant)');
     const tick = setInterval(() => {
@@ -1945,7 +1957,7 @@
         if (st) st.textContent = 'Filevine did not answer, so only your cases are shown.';
         return;
       }
-      if (m.fallback) {
+      if (m.fallback && !panel.dataset.keep) {
         panel.remove();
         toast('Direct search failed, using the search box instead.');
         m.fallback(entry);
@@ -2764,6 +2776,7 @@
     courtNoCache.set(pid, p);
     return p;
   }
+  const BENCH_WIN = 'pd9-benchmark';
   const benchmarkUrl = (caseNo) => `https://courts.osceolaclerk.com/BenchmarkWeb/Home.aspx/Search#pd9case=${encodeURIComponent(caseNo)}`;
 
   let benchKey = '';
@@ -2780,7 +2793,7 @@
     if (existing && (existing.dataset.pid !== String(pid) || !caseNo)) existing.remove();
     if (!caseNo || document.getElementById('pd9-bench-btn')) {
       const b = document.getElementById('pd9-bench-btn');
-      if (b) { b.dataset.caseNo = caseNo; b.title = `Look up ${caseNo} on the Osceola Clerk's site (new tab)`; }
+      if (b) { b.dataset.caseNo = caseNo; b.title = `Look up ${caseNo} on the Osceola Clerk's site (Ctrl or middle click: new tab)`; }
       return;
     }
     const vitals = [...document.querySelectorAll('.vitals-toggle button, button')].find((b) => /^\s*vitals\s*$/i.test(b.querySelector('.vitals-btn-text')?.textContent || ''));
@@ -2789,7 +2802,7 @@
     btn.id = 'pd9-bench-btn';
     btn.dataset.pid = String(pid);
     btn.dataset.caseNo = caseNo;
-    btn.title = `Look up ${caseNo} on the Osceola Clerk's site (new tab)`;
+    btn.title = `Look up ${caseNo} on the Osceola Clerk's site (Ctrl or middle click: new tab)`;
     const icon = btn.querySelector('i');
     if (icon) {
       const hidden = icon.querySelector('.visually-hidden');
@@ -2800,16 +2813,31 @@
     const label = btn.querySelector('.vitals-btn-text') || btn.querySelector('.text-container');
     if (label) label.textContent = 'Benchmark';
     btn.style.marginRight = '8px';
-    btn.addEventListener('click', async (e) => {
+    // Click: use the same Benchmark tab as last time. Ctrl/Cmd click or
+    // middle click: a new Benchmark tab.
+    const openBench = async (newTab) => {
+      // Get the tab now (so the browser does not block it), then read the
+      // Court Case Number again in case someone just changed it.
+      const tab = newTab ? window.open('about:blank', '_blank') : window.open('', BENCH_WIN);
+      const fresh = benchmarkCaseNumber(await Promise.race([courtCaseNumber(btn.dataset.pid, true), sleep(2500).then(() => '')])) || btn.dataset.caseNo;
+      if (tab) {
+        if (newTab) { try { tab.opener = null; } catch (err) { /* ignore */ } }
+        tab.location.href = benchmarkUrl(fresh);
+        try { tab.focus(); } catch (err) { /* ignore */ }
+      } else window.open(benchmarkUrl(fresh), newTab ? '_blank' : BENCH_WIN);
+      benchKey = '';
+    };
+    btn.addEventListener('click', (e) => {
       e.preventDefault();
       e.stopPropagation();
-      // Open the tab now (so the browser does not block it), then read the
-      // Court Case Number again in case someone just changed it.
-      const tab = window.open('about:blank', '_blank');
-      const fresh = benchmarkCaseNumber(await Promise.race([courtCaseNumber(btn.dataset.pid, true), sleep(2500).then(() => '')])) || btn.dataset.caseNo;
-      if (tab) { try { tab.opener = null; } catch (err) { /* ignore */ } tab.location.href = benchmarkUrl(fresh); }
-      else window.open(benchmarkUrl(fresh), '_blank', 'noopener');
-      benchKey = '';
+      openBench(e.ctrlKey || e.metaKey || e.shiftKey);
+    });
+    btn.addEventListener('mousedown', (e) => { if (e.button === 1) e.preventDefault(); }); // no autoscroll
+    btn.addEventListener('auxclick', (e) => {
+      if (e.button !== 1) return;
+      e.preventDefault();
+      e.stopPropagation();
+      openBench(true);
     });
     const holder = vitals.closest('.vitals-toggle') || vitals;
     holder.before(btn);
@@ -2817,7 +2845,7 @@
 
   let jailKey = '';
   function addJailButton() {
-    const key = `${location.href}|${document.title}`;
+    const key = `${location.href}|${pageTitle()}`;
     if (key === jailKey && (document.getElementById('pd9-jail-btn') || !jailSearchFor())) return;
     jailKey = key;
     const want = inCase() ? jailSearchFor() : null;
@@ -3410,7 +3438,7 @@
 
   let depoKey = '';
   function addDepoButton() {
-    const key = `${location.href}|${document.title}`;
+    const key = `${location.href}|${pageTitle()}`;
     if (key === depoKey && document.getElementById('pd9-depo-btn')) return;
     depoKey = key;
     const existing = document.getElementById('pd9-depo-btn');
@@ -4003,6 +4031,7 @@
         a.addEventListener('click', (ev) => {
           if (ev.button !== 0) return;
           if (ev.ctrlKey || ev.metaKey || ev.shiftKey) { ev.preventDefault(); window.open(a.href, '_blank', 'noopener'); return; } // a fresh tab
+          if (sidePanel()) { ev.preventDefault(); sideOpen(r); return; }
           if (!windowMode()) return; // the shared case tab, as the link says
           ev.preventDefault();
           openCaseWindow(r.id, `${r.caseNo || ''}  ${r.defendant || r.clientName || ''}`.trim());
@@ -4274,10 +4303,12 @@
     const pick = cols[0];
     const rest = cols.slice(1);
     rest.forEach((c) => { if (!c.dataset.base) c.dataset.base = String(parseFloat(c.style.width) || 100); });
-    const pickW = parseFloat(pick.style.width) || 50;
+    const pw = parseFloat(pick.style.width);
+    const pickW = Number.isNaN(pw) ? 50 : pw;
     const base = rest.reduce((n, c) => n + Number(c.dataset.base), 0);
     const room = wrap.clientWidth - pickW;
-    const factor = room > base ? room / base : 1;
+    const docked = !!table.closest('.pd9-hs-docked');
+    const factor = room > base || (docked && room > 0) ? room / base : 1;
     rest.forEach((c) => { c.style.width = `${Math.floor(Number(c.dataset.base) * factor)}px`; });
     table.style.width = `${pickW + rest.reduce((n, c) => n + parseFloat(c.style.width), 0)}px`;
   }
@@ -4287,7 +4318,9 @@
     if (!hubTable || !hubTable.rows) return;
     learnAvatarColors();
     const layout = ownLayout();
-    const cols = layout.order.map((k) => OWN_COLS.find((c) => c.key === k));
+    const docked = ov.classList.contains('pd9-hs-docked');
+    // Next to an open case (side panel), just Case Number and Defendant.
+    const cols = layout.order.map((k) => OWN_COLS.find((c) => c.key === k)).filter((c) => !docked || c.key === 'caseNo' || c.key === 'defendant');
     const sort = store.get(HUB_SORT_KEY, null) || { col: 'next', dir: 'asc' };
     const col = OWN_COLS.find((c) => c.key === sort.col) || OWN_COLS[3];
     // Hook for the separate PD9 Manager script: it sets data-pd9-county="OS" on the page
@@ -4295,7 +4328,7 @@
     const county = (document.documentElement.getAttribute('data-pd9-county') || '').toUpperCase();
     const inCounty = (r) => !county || String(r.caseNo || '').toUpperCase().replace(/[^A-Z0-9]/g, '').endsWith(county);
     const pins = pinSet();
-    const rows = hubTable.rows.filter((r) => passesTagFilter(r) && inCounty(r)).sort((a, b) => {
+    const rows = hubTable.rows.filter((r) => passesTagFilter(r) && inCounty(r) && (!docked || stacRowMatch(r))).sort((a, b) => {
       const pa = pins.has(String(a.id)), pb = pins.has(String(b.id));
       if (pa !== pb) return pa ? -1 : 1; // pinned cases always on top
       const x = col.sort(a), y = col.sort(b);
@@ -4311,7 +4344,7 @@
     wrap.textContent = '';
     const table = document.createElement('table');
     const colgroup = document.createElement('colgroup');
-    const pickW = Math.min(200, Math.max(44, +layout.widths._pick || 50));
+    const pickW = docked ? 0 : Math.min(200, Math.max(44, +layout.widths._pick || 50));
     const pickCol = document.createElement('col'); pickCol.style.width = `${pickW}px`; colgroup.appendChild(pickCol);
     cols.forEach((c) => { const el = document.createElement('col'); el.style.width = `${layout.widths[c.key] || c.width}px`; el.dataset.key = c.key; colgroup.appendChild(el); });
     table.style.width = `${pickW + cols.reduce((n, c) => n + (layout.widths[c.key] || c.width), 0)}px`;
@@ -4450,6 +4483,19 @@
     rows.forEach((r, i) => {
       const tr = document.createElement('tr');
       if (bulkPicked.has(r.id)) tr.classList.add('pd9-picked');
+      tr.dataset.id = String(r.id);
+      if (side && side.open && side.id === String(r.id)) tr.classList.add('pd9-row-open');
+      // Click anywhere on the row to open the case (buttons, links and boxes in it keep their own job).
+      tr.addEventListener('mouseenter', () => sideWarm(r.id));
+      tr.addEventListener('click', (e) => {
+        if (e.button !== 0 || e.target.closest('a, button, input, label, select, textarea, [role="button"], .pd9-pick')) return;
+        if (String(window.getSelection() || '').trim()) return; // selecting text, not opening
+        const title = `${r.caseNo || ''}  ${r.defendant || r.clientName || ''}`.trim();
+        if (e.ctrlKey || e.metaKey || e.shiftKey) { window.open(`${location.origin}${location.pathname}${caseHash(r.id)}`, '_blank', 'noopener'); return; }
+        if (sidePanel()) sideOpen(r);
+        else if (windowMode()) openCaseWindow(r.id, title);
+        else window.open(`${location.origin}${location.pathname}${caseHash(r.id)}`, CASE_TAB);
+      });
       const pick = document.createElement('td');
       pick.className = 'pd9-pick';
       const cb = document.createElement('input');
@@ -4619,8 +4665,33 @@
         store.set(WIN_MODE_KEY, e.target.checked);
         e.target.setAttribute('aria-checked', String(e.target.checked));
         if (e.target.checked) makeSpare(); else document.querySelectorAll('.pd9-win-spare').forEach((x) => x.remove());
+        // Window mode and Stac mode are either/or.
+        if (e.target.checked) { store.set(SIDE_KEY, false); sideClose(); }
+        const sb = document.querySelector('#pd9-side-toggle input');
+        if (sb) { sb.checked = sidePanel(); sb.setAttribute('aria-checked', String(sb.checked)); }
       });
       toggle.after(w);
+    }
+    if (!STAFF && !document.getElementById('pd9-side-toggle')) {
+      const winT = document.getElementById('pd9-win-toggle');
+      const sp = (winT || toggle).cloneNode(true);
+      sp.id = 'pd9-side-toggle';
+      (sp.querySelector('.form-field-label') || sp.lastChild).textContent = sp.querySelector('.form-field-label') ? 'Stac mode' : ' Stac mode';
+      sp.title = 'Stac mode: click a case to open it next to the table, so your case list stays in view.';
+      const sb = sp.querySelector('input');
+      sb.checked = sidePanel();
+      sb.setAttribute('aria-checked', String(sb.checked));
+      sb.addEventListener('change', (e) => {
+        store.set(SIDE_KEY, e.target.checked);
+        e.target.setAttribute('aria-checked', String(e.target.checked));
+        if (e.target.checked) {
+          store.set(WIN_MODE_KEY, false);
+          document.querySelectorAll('.pd9-win-spare').forEach((x) => x.remove());
+          const wbx = document.querySelector('#pd9-win-toggle input');
+          if (wbx) { wbx.checked = false; wbx.setAttribute('aria-checked', 'false'); }
+        } else sideClose();
+      });
+      (winT || toggle).after(sp);
     }
     if (!useOwn) { if (ov) ov.remove(); return; }
     if (!ov) {
@@ -5515,6 +5586,7 @@
       close();
       rememberRecent(it.id);
       if (newTab) window.open(location.origin + location.pathname + hash, '_blank', 'noopener');
+      else if (stacActive()) stacOpenCase(it.id, it.title || '');
       else location.hash = hash;
     };
 
@@ -6332,6 +6404,386 @@
     if (ff.query && ffItems().length !== ff.seen) ffApply();
   }
 
+  // ---------- Tab title: "Filevine | 25-CF-3158" ----------
+  // On a case (or with a case open in Stac mode), the browser tab shows the
+  // short case number: no filler zeros, no defendant letter or county. Filevine's own title is kept
+  // for the script's checks (pageTitle). Case frames keep their real title.
+  // var and a function (not let/const) so code above this point can call it early.
+  var tabRealTitle = document.title; // eslint-disable-line no-var
+  var tabSetTitle = ''; // eslint-disable-line no-var
+  function pageTitle() { return !IN_FRAME && document.title === tabSetTitle ? tabRealTitle : document.title; }
+  function shortCaseNo(title) {
+    const t = String(title || '');
+    const c = readCaseNumbers(t.includes('|') ? t.slice(t.indexOf('|') + 1) : t)[0];
+    return c ? `${c.year}-${c.type}-${c.num}` : '';
+  }
+  function keepTabTitle() {
+    if (IN_FRAME) return;
+    if (document.title !== tabSetTitle) tabRealTitle = document.title;
+    let no = '';
+    if (side && side.open) {
+      try { no = shortCaseNo(side.frame.contentWindow.document.title); } catch (e) { /* use the row */ }
+      if (!no) no = shortCaseNo(`| ${side.caseNo || ''}`);
+    } else if (inCase()) no = shortCaseNo(tabRealTitle);
+    if (no) {
+      const want = `Filevine | ${no}`;
+      if (document.title !== want) { tabSetTitle = want; document.title = want; }
+    } else if (document.title === tabSetTitle) {
+      tabSetTitle = '';
+      document.title = tabRealTitle;
+    }
+  }
+  if (!IN_FRAME) {
+    setInterval(keepTabTitle, 700);
+    window.addEventListener('hashchange', () => setTimeout(keepTabTitle, 50));
+  }
+
+  // ---------- Stac mode: the case slides in next to the PD9 table ----------
+  // Click a row (or the case number) in the PD9 table and the case slides in
+  // from the right, in a frame without Filevine's header, so it feels like one
+  // page. The table shrinks to Case Number and Defendant on the left; click
+  // another row to switch cases. × (or Esc) slides it away and the full table
+  // comes back. Ctrl/middle click still opens a new tab. On by default; the
+  // "Stac mode" box next to "Window mode" turns it off.
+  const SIDE_KEY = 'pd9-side-panel';
+  const SIDE_W_KEY = 'pd9-side-list-width';
+  const SIDE_FRAME = 'pd9-panel';
+  const sidePanel = () => !STAFF && !IN_FRAME && store.get(SIDE_KEY, true) && !windowMode();
+  if (IN_FRAME && window.name === SIDE_FRAME) document.documentElement.classList.add('pd9-in-panel');
+  const SIDE_EASE = 'cubic-bezier(.16, 1, .3, 1)';
+  const SIDE_MS = 380;
+  let side = null; // { panel, frame, id, ready }
+
+  const sideTop = () => {
+    const h = $('.app-header') || $('#fvs-header');
+    const r = h && h.getBoundingClientRect();
+    return r && r.height && r.bottom > 0 ? Math.round(r.bottom) : 55;
+  };
+  const sideListWidth = () => Math.min(Math.max(+store.get(SIDE_W_KEY, 0) || Math.round(window.innerWidth / 4), 260), window.innerWidth - 480);
+  const caseHash = (id) => `#/project/${encodeURIComponent(id)}/activity`;
+
+  function sideEnsure() {
+    if (side) return side;
+    const panel = document.createElement('section');
+    panel.id = 'pd9-casepanel';
+    panel.setAttribute('aria-label', 'Case');
+    panel.innerHTML = `
+      <span class="pd9-cp-edge" title="Drag to resize" aria-hidden="true"></span>
+      <header class="pd9-cp-head">
+        <span class="pd9-cp-title"></span>
+        <button type="button" class="pd9-cp-btn pd9-cp-tab" title="Open in a new tab" aria-label="Open in a new tab"><svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true"><path d="M14 5h5v5M19 5l-8 8M18 14v5H5V6h5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+        <button type="button" class="pd9-cp-btn pd9-cp-x" title="Close (Esc)" aria-label="Close the case"><svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="M7 7l10 10M17 7L7 17" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></button>
+      </header>
+      <div class="pd9-cp-body"><iframe name="${SIDE_FRAME}" title="Case"></iframe><div class="pd9-cp-loading">Loading the case...</div></div>`;
+    document.body.appendChild(panel);
+    const frame = $('iframe', panel);
+    side = { panel, frame, id: null, ready: false, open: false };
+    frame.addEventListener('load', () => { side.ready = true; panel.classList.add('pd9-cp-loaded'); });
+    $('.pd9-cp-x', panel).addEventListener('click', () => sideClose());
+    $('.pd9-cp-tab', panel).addEventListener('click', () => {
+      let h = side.id ? caseHash(side.id) : '';
+      try { h = frame.contentWindow.location.hash || h; } catch (e) { /* keep the case address */ }
+      if (h) window.open(`${location.origin}${location.pathname}${h}`, '_blank', 'noopener');
+    });
+    // Drag the left edge to make the case wider or narrower.
+    const edge = $('.pd9-cp-edge', panel);
+    edge.addEventListener('pointerdown', (e) => {
+      e.preventDefault();
+      edge.setPointerCapture(e.pointerId);
+      document.documentElement.classList.add('pd9-cp-resizing');
+      const move = (ev) => sideLayout(Math.min(Math.max(ev.clientX, 260), window.innerWidth - 480));
+      const up = () => {
+        edge.removeEventListener('pointermove', move);
+        edge.removeEventListener('pointerup', up);
+        document.documentElement.classList.remove('pd9-cp-resizing');
+        store.set(SIDE_W_KEY, Math.round(panel.getBoundingClientRect().left));
+      };
+      edge.addEventListener('pointermove', move);
+      edge.addEventListener('pointerup', up);
+    });
+    return side;
+  }
+
+  // Load a case into the frame. If the frame already has Filevine running,
+  // only the address changes (no reload), so switching cases is quick.
+  function sideLoad(id) {
+    const s = sideEnsure();
+    let here = s.id;
+    try { if (s.ready) here = (s.frame.contentWindow.location.hash.match(/^#\/project\/(\d+)/) || [])[1] || null; } catch (e) { /* keep s.id */ }
+    if (s.id === String(id) && here === s.id) return;
+    s.id = String(id);
+    const url = `${location.origin}${location.pathname}${caseHash(id)}`;
+    try {
+      if (s.ready && s.frame.contentWindow.location.pathname === location.pathname) { s.frame.contentWindow.location.hash = caseHash(id); return; }
+    } catch (e) { /* load it fresh */ }
+    s.ready = false;
+    s.panel.classList.remove('pd9-cp-loaded');
+    s.frame.src = url;
+  }
+
+  // Warm up: start loading the case you hover, so it is ready when you click.
+  let sideWarmTimer = 0;
+  function sideWarm(id) {
+    if (!sidePanel() || (side && side.open)) return;
+    clearTimeout(sideWarmTimer);
+    sideWarmTimer = setTimeout(() => { if (!side || !side.ready || !side.open) sideLoad(id); }, 250);
+  }
+
+  function sideLayout(listW = sideListWidth()) {
+    const top = sideTop();
+    const root = document.documentElement;
+    root.style.setProperty('--pd9-cp-top', `${top}px`);
+    root.style.setProperty('--pd9-cp-list', `${listW}px`);
+  }
+
+  function sideOpen(r) {
+    if (!r) return;
+    const ov = document.getElementById('pd9-hub-sorted');
+    const s = sideEnsure();
+    sideLoad(r.id);
+    s.caseNo = r.caseNo || '';
+    setTimeout(keepTabTitle, 0);
+    $('.pd9-cp-title', s.panel).textContent = `${r.caseNo || ''}  ${r.defendant || r.clientName || ''}`.trim();
+    rememberRecent(r.id);
+    $$('#pd9-hub-sorted tr.pd9-row-open').forEach((tr) => tr.classList.remove('pd9-row-open'));
+    const tr = ov && $(`tr[data-id="${CSS.escape(String(r.id))}"]`, ov);
+    if (tr) tr.classList.add('pd9-row-open');
+    if (s.open) return;
+    s.open = true;
+    window.scrollTo(0, 0); // measure the header where it really sits
+    sideLayout();
+    // The table: from where it is now to the left column, in one smooth move.
+    if (ov) {
+      const from = ov.getBoundingClientRect();
+      ov.style.setProperty('--pd9-from-l', `${from.left}px`);
+      ov.style.setProperty('--pd9-from-t', `${from.top}px`);
+      ov.style.setProperty('--pd9-from-w', `${from.width}px`);
+      ov.style.setProperty('--pd9-from-h', `${from.height}px`);
+      // Move the table up to the page itself while docked, so nothing around it
+      // (Filevine's layout) can shift where it sits. It goes back when the panel closes.
+      side.home = ov.parentElement;
+      ov.classList.add('pd9-hs-docking');
+      document.body.appendChild(ov);
+      void ov.offsetWidth;
+      ov.classList.add('pd9-hs-docked');
+      stacFindReset();
+      stacFindEnsure(ov);
+      drawOwnTable(ov);
+      const open = $(`tr[data-id="${CSS.escape(String(r.id))}"]`, ov);
+      if (open) {
+        open.classList.add('pd9-row-open');
+        // Keep the open case in view inside the list (without scrolling the page).
+        const wrap = $('.pd9-hs-wrap', ov);
+        if (wrap) wrap.scrollTop = Math.max(0, open.offsetTop - wrap.clientHeight / 3);
+      }
+    }
+    document.documentElement.classList.add('pd9-cp-open');
+    // Keep Filevine's header menus (search results, account menu) above the panel.
+    const header = $('.app-header');
+    if (header && !header.dataset.pd9Z) {
+      header.dataset.pd9Z = '1';
+      if (getComputedStyle(header).position === 'static') header.style.position = 'relative';
+      header.style.zIndex = '9002';
+    }
+    s.panel.classList.add('pd9-cp-show');
+    setTimeout(() => { if (ov) { ov.classList.remove('pd9-hs-docking'); if (ov.classList.contains('pd9-hs-docked')) drawOwnTable(ov); } }, SIDE_MS + 40);
+  }
+
+  function sideClose() {
+    if (!side || !side.open) return;
+    side.open = false;
+    setTimeout(keepTabTitle, 0);
+    const ov = document.getElementById('pd9-hub-sorted');
+    side.panel.classList.remove('pd9-cp-show');
+    document.documentElement.classList.remove('pd9-cp-open');
+    $$('#pd9-hub-sorted tr.pd9-row-open').forEach((tr) => tr.classList.remove('pd9-row-open'));
+    if (ov) {
+      const home = side.home && side.home.isConnected ? side.home : null;
+      const host = home && home.getBoundingClientRect();
+      if (host) {
+        ov.style.setProperty('--pd9-from-l', `${host.left}px`);
+        ov.style.setProperty('--pd9-from-t', `${host.top}px`);
+        ov.style.setProperty('--pd9-from-w', `${host.width}px`);
+        ov.style.setProperty('--pd9-from-h', `${host.height}px`);
+      }
+      ov.classList.add('pd9-hs-docking', 'pd9-hs-undocking');
+      ov.classList.remove('pd9-hs-docked');
+      stacFindReset();
+      setTimeout(() => {
+        if (home) home.appendChild(ov); else ov.remove(); // the Project Hub redraws it if its spot is gone
+        ov.classList.remove('pd9-hs-docking', 'pd9-hs-undocking');
+        if (ov.isConnected) drawOwnTable(ov); // all the columns again
+      }, SIDE_MS);
+    }
+  }
+
+  // ----- Stac mode search: one box above the docked PD9 table -----
+  // Typing filters your cases right away (name or case number). If none of
+  // your cases match, or you press Enter, it also searches all of Filevine
+  // (archived too): case numbers like 241234 or 24cf1234, or names in any order.
+  let stacQuery = '';
+  let stacAuto = 0;
+  const flatNo = (t) => String(t || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+  function stacRowMatch(r) {
+    const q = stacQuery.trim();
+    if (!q) return true;
+    const cq = readCaseQuery(q);
+    const c = readCaseNumbers(r.caseNo)[0];
+    if (cq.length && c && cq.some((x) => caseFits(x, c))) return true;
+    if (/\d/.test(q) && flatNo(q).length >= 2 && flatNo(r.caseNo).includes(flatNo(q))) return true;
+    const want = nameWords(q);
+    const have = nameWords(`${r.defendant || ''} ${r.clientName || ''}`);
+    return want.length > 0 && want.every((w) => have.some((h) => h.startsWith(w)));
+  }
+  const stacMode = (q) => (readCaseQuery(q).length ? 'case' : 'name');
+  function stacSearchAll(box, q) {
+    const out = $('.pd9-case-results', box);
+    const m = SEARCH_MODES[stacMode(q)];
+    const problem = m.check(q);
+    if (problem) { out.innerHTML = `<div class="pd9-case-status">${escapeHtml(problem)}</div>`; return; }
+    searchDirect(q, box, m);
+  }
+  function stacFindEnsure(ov) {
+    let box = document.getElementById('pd9-stac-find');
+    if (box && ov.contains(box)) return box;
+    if (box) box.remove();
+    box = document.createElement('div');
+    box.id = 'pd9-stac-find';
+    box.dataset.keep = '1';
+    box.innerHTML = `
+      <div class="pd9-sf-row">${MAGNIFIER}<input type="search" autocomplete="off" spellcheck="false" aria-label="Search cases" placeholder="Name or case # (Enter searches all of Filevine)"><button type="button" class="pd9-sf-x" title="Clear" aria-label="Clear" hidden>\u00d7</button></div>
+      <div class="pd9-sf-hint"></div>
+      <div class="pd9-case-results" aria-live="polite"></div>
+      <button type="button" class="pd9-go" hidden></button>`;
+    const bar = $('.pd9-hs-bar', ov);
+    if (bar) bar.after(box); else ov.prepend(box);
+    const input = $('input', box);
+    const x = $('.pd9-sf-x', box);
+    const hint = $('.pd9-sf-hint', box);
+    const out = $('.pd9-case-results', box);
+    // While Filevine results are showing, they take the whole left side.
+    new MutationObserver(() => ov.classList.toggle('pd9-sf-on', out.childElementCount > 0)).observe(out, { childList: true });
+    const update = () => {
+      stacQuery = input.value;
+      x.hidden = !input.value;
+      out.textContent = '';
+      if (searchRequest) searchRequest.abort();
+      clearTimeout(stacAuto);
+      drawOwnTable(ov);
+      const q = input.value.trim();
+      const shown = $$('.pd9-hs-wrap tbody tr', ov).length;
+      if (!q) { hint.textContent = ''; return; }
+      const mode = stacMode(q);
+      const ok = !SEARCH_MODES[mode].check(q);
+      hint.textContent = shown
+        ? `${shown} of your cases. Press Enter to search all of Filevine for this ${mode === 'case' ? 'case number' : 'name'}.`
+        : ok ? 'None of your cases match. Searching all of Filevine...' : 'None of your cases match.';
+      if (!shown && ok) stacAuto = setTimeout(() => stacSearchAll(box, q), 500);
+    };
+    input.addEventListener('input', update);
+    ['keydown', 'keyup', 'keypress'].forEach((t) => input.addEventListener(t, (e) => {
+      e.stopPropagation();
+      if (t !== 'keydown') return;
+      if (e.key === 'Enter') { e.preventDefault(); clearTimeout(stacAuto); const q = input.value.trim(); if (q) { hint.textContent = ''; stacSearchAll(box, q); } }
+      if (e.key === 'Escape' && input.value) { e.preventDefault(); input.value = ''; update(); }
+    }));
+    x.addEventListener('click', () => { input.value = ''; update(); input.focus(); });
+    return box;
+  }
+  function stacFindReset() {
+    clearTimeout(stacAuto);
+    stacQuery = '';
+    const box = document.getElementById('pd9-stac-find');
+    if (!box) return;
+    $('input', box).value = '';
+    $('.pd9-sf-x', box).hidden = true;
+    $('.pd9-sf-hint', box).textContent = '';
+    $('.pd9-case-results', box).textContent = '';
+  }
+
+  // Open a case on the right from anywhere on the Project Hub (switcher, search results).
+  const stacActive = () => sidePanel() && onHub();
+  function stacOpenCase(id, title = '') {
+    const row = hubTable && hubTable.rows && hubTable.rows.find((r) => r.id === String(id));
+    const t = String(title);
+    const [name, no] = t.includes('|') ? t.split('|').map((x) => x.trim()) : t.split(/\s{2,}/).map((x) => x.trim()).reverse();
+    sideOpen(row || { id: String(id), caseNo: no || '', clientName: name || '' });
+  }
+
+  // Stac mode: N, T, C and template shortcuts pressed on the Project Hub go to
+  // the case on the right.
+  function sideForwardKey(e, msg) {
+    if (!side || !side.open || !side.ready || isTyping(e) || document.querySelector('.pd9-overlay')) return false;
+    e.preventDefault();
+    e.stopImmediatePropagation();
+    try {
+      side.frame.focus();
+      side.frame.contentWindow.focus();
+      side.frame.contentWindow.postMessage({ pd9: 'hotkey', ...msg }, location.origin);
+    } catch (err) { return false; }
+    return true;
+  }
+  if (IN_FRAME && window.name === SIDE_FRAME) {
+    window.addEventListener('message', (e) => {
+      if (e.origin !== location.origin || !e.data || e.data.pd9 !== 'hotkey' || !inCase()) return;
+      if (e.data.kind === 'type') { openFloating(e.data.type); return; }
+      const tpl = TEMPLATES.find((t) => t.label === e.data.label);
+      if (tpl) openFloating(tpl.type === 'call' ? 'call' : 'note').then((form) => { if (form) useTemplate(form, tpl); });
+    });
+    // Esc inside the case closes Stac mode, unless it is closing something else first
+    // (a note box, a menu, a dialog) or you are typing.
+    document.addEventListener('keydown', (e) => {
+      if (e.key !== 'Escape' || e.defaultPrevented || isTyping(e)) return;
+      if (document.querySelector('.pd9-overlay, [role="dialog"]:not([hidden]), .modal.in, .modal.show')) return;
+      const form = $(SEL.docked);
+      if (form && isVisible(form) && isVisible($(SEL.message, form))) return;
+      try { window.parent.postMessage({ pd9: 'closePanel' }, location.origin); } catch (err) { /* ignore */ }
+    });
+  }
+  if (!IN_FRAME && !STAFF) {
+    window.addEventListener('message', (e) => {
+      if (e.origin === location.origin && e.data && e.data.pd9 === 'closePanel' && side && e.source === side.frame.contentWindow) sideClose();
+    });
+  }
+
+  if (!IN_FRAME && !STAFF) {
+    document.addEventListener('keydown', (e) => {
+      if (e.key !== 'Escape' || !side || !side.open || isTyping(e) || document.querySelector('.pd9-overlay')) return;
+      e.preventDefault();
+      sideClose();
+    });
+    window.addEventListener('resize', () => {
+      if (!side || !side.open) return;
+      sideLayout();
+      const ov = document.getElementById('pd9-hub-sorted');
+      const t = ov && $('.pd9-hs-wrap table', ov);
+      if (t) fitHubColumns(t);
+    });
+    // In Stac mode, a case picked from the top page (Filevine's header search,
+    // Switch case, a search result) opens on the right instead of leaving the
+    // Project Hub. Other pages (Tasks, Feed, ...) put the panel away.
+    window.addEventListener('hashchange', (e) => {
+      const was = (String(e.oldURL || '').match(/#.*$/) || [''])[0];
+      const id = (location.hash.match(/^#\/project\/(\d+)/) || [])[1];
+      if (sidePanel() && /^#\/projecthub/i.test(was) && id) {
+        location.replace(`${location.origin}${location.pathname}${was}`);
+        stacOpenCase(id);
+        return;
+      }
+      if (side && side.open && !onHub()) sideClose();
+    });
+    // Header buttons while a case is open: Project Hub closes the case; Tasks,
+    // Feed and Documents open in a new tab so your spot here stays put.
+    document.addEventListener('click', (e) => {
+      const a = e.target.closest && e.target.closest('a.primary-nav-item[href]');
+      if (!a || !side || !side.open || e.button !== 0 || e.ctrlKey || e.metaKey || e.shiftKey) return;
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      if (/#\/projecthub/i.test(a.getAttribute('href'))) sideClose();
+      else window.open(a.href, '_blank');
+    }, true);
+  }
+
   // ---------- Intake and Request tabs: small helpers ----------
   //  - "Today" next to Today's Date (Intake) and Date Requested (Request).
   //  - "File Review" template next to Incident Details (Intake).
@@ -6696,6 +7148,7 @@
       const tpl = combo && (TEMPLATES.find((t) => t.hotkey === combo) ||
         (combo === 'C' && TEMPLATES.find((t) => /^client call$/i.test(t.label.trim()) || /^contact$/i.test(t.label.trim()))));
       if (tpl) {
+        if (!inCase() && sideForwardKey(e, { kind: 'tpl', label: tpl.label })) return;
         if (!inCase() || isTyping(e) || document.querySelector('.pd9-overlay')) return;
         e.preventDefault();
         e.stopImmediatePropagation();
@@ -6707,6 +7160,7 @@
     const type = HOTKEYS[e.key.toLowerCase()];
     if (!type) return;
     if (e.ctrlKey || e.metaKey || e.altKey || e.shiftKey || e.repeat || e.isComposing) return;
+    if (!inCase() && sideForwardKey(e, { kind: 'type', type })) return;
     if (!inCase() || isTyping(e) || document.querySelector('.pd9-overlay')) return;
     e.preventDefault();
     openFloating(type);
@@ -7536,6 +7990,68 @@
     .pd9-field-btn:hover { background: #e7f3f2; border-color: #1f7a77; }
     html.pd9-dark .pd9-field-btn { background: #1b1f24; border-color: #3a414b; color: #5fd4c4; }
     html.pd9-dark .pd9-field-btn:hover { background: #17302d; }
+    /* ---------- Stac mode (case next to the PD9 table) ---------- */
+    #pd9-hub-sorted.pd9-hs-docked .pd9-pick { padding: 0 !important; visibility: hidden; overflow: hidden; }
+    #pd9-hub-sorted.pd9-hs-docked .pd9-bulk-bar { display: none; }
+    #pd9-hub-sorted.pd9-hs-docked tbody tr.pd9-row-open td:nth-child(2) { box-shadow: inset 3px 0 0 var(--accent); }
+    #pd9-hub-sorted tbody tr { cursor: pointer; }
+    #pd9-hub-sorted tbody tr.pd9-row-open td { background: #e3f1f0 !important; }
+    #pd9-hub-sorted tbody tr.pd9-row-open td:first-child { box-shadow: inset 3px 0 0 var(--accent); }
+    #pd9-hub-sorted.pd9-hs-docking { position: fixed; z-index: 9000; left: var(--pd9-from-l); top: var(--pd9-from-t); width: var(--pd9-from-w); height: var(--pd9-from-h); inset: auto;
+      transition: left ${SIDE_MS}ms ${SIDE_EASE}, top ${SIDE_MS}ms ${SIDE_EASE}, width ${SIDE_MS}ms ${SIDE_EASE}, height ${SIDE_MS}ms ${SIDE_EASE}, border-radius ${SIDE_MS}ms; }
+    #pd9-hub-sorted.pd9-hs-docked { position: fixed; z-index: 9000; inset: auto; left: 0; top: var(--pd9-cp-top, 55px); width: var(--pd9-cp-list, 33vw); height: calc(100vh - var(--pd9-cp-top, 55px)); border-radius: 0; border-width: 0 1px 0 0; }
+    html.pd9-cp-open, html.pd9-cp-open body { overflow: hidden !important; }
+    #pd9-casepanel { position: fixed; z-index: 9001; top: var(--pd9-cp-top, 55px); bottom: 0; right: 0; left: var(--pd9-cp-list, 33vw); margin: 0; display: flex; flex-direction: column;
+      background: var(--t-color-background-primary, #fff); box-shadow: -24px 0 48px -24px rgba(16, 24, 40, .35), -1px 0 0 rgba(16, 24, 40, .08);
+      transform: translateX(calc(100% + 40px)); pointer-events: none; transition: transform ${SIDE_MS}ms ${SIDE_EASE}; will-change: transform; }
+    #pd9-casepanel.pd9-cp-show { transform: none; pointer-events: auto; }
+    html.pd9-cp-resizing #pd9-casepanel, html.pd9-cp-resizing #pd9-hub-sorted { transition: none !important; }
+    html.pd9-cp-resizing iframe { pointer-events: none; }
+    .pd9-cp-edge { position: absolute; left: -4px; top: 0; bottom: 0; width: 8px; cursor: ew-resize; z-index: 2; }
+    .pd9-cp-edge:hover { background: rgba(31, 122, 119, .25); }
+    .pd9-cp-head { flex: none; display: flex; align-items: center; gap: 4px; height: 40px; padding: 0 8px 0 16px; border-bottom: 1px solid #e9ecf1; background: #f8f9fb; }
+    .pd9-cp-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13.5px; font-weight: 600; color: #1d2433; }
+    .pd9-cp-btn { all: unset; display: grid; place-items: center; width: 30px; height: 30px; border-radius: 6px; color: #475467; cursor: pointer; }
+    .pd9-cp-btn:hover { background: rgba(16, 24, 40, .07); color: #1d2433; }
+    .pd9-cp-x:hover { background: #fee4e2; color: #b42318; }
+    .pd9-cp-btn:focus-visible { outline: 2px solid #1f7a77; outline-offset: 1px; }
+    .pd9-cp-body { position: relative; flex: 1; min-height: 0; }
+    .pd9-cp-body iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; background: #fff; }
+    .pd9-cp-loading { position: absolute; inset: 0; display: grid; place-items: center; color: #8b95a3; font-size: 13px; background: var(--t-color-background-primary, #fff); }
+    .pd9-cp-loaded .pd9-cp-loading { display: none; }
+    html.pd9-in-panel .app-header { display: none !important; }
+    html.pd9-in-panel .crops-app-container { height: 100% !important; }
+    #pd9-hub-sorted:not(.pd9-hs-docked) #pd9-stac-find { display: none; }
+    #pd9-stac-find { padding: 8px 12px; border-bottom: 1px solid var(--line, #dfe3e8); font-size: 13px; }
+    #pd9-stac-find .pd9-sf-row { display: flex; align-items: center; gap: 6px; padding: 0 8px; border: 1px solid var(--t-color-border, #c9ced6); border-radius: 8px; background: var(--t-color-background-primary, #fff); color: #667085; }
+    #pd9-stac-find .pd9-sf-row:focus-within { border-color: #2b7a78; box-shadow: 0 0 0 3px rgba(43, 122, 120, .15); }
+    #pd9-stac-find input { flex: 1; min-width: 0; border: 0; outline: 0; background: none; padding: 7px 0; font: inherit; color: var(--t-color-text-primary, #1f2933); }
+    #pd9-stac-find input::-webkit-search-cancel-button { display: none; }
+    #pd9-stac-find .pd9-sf-x { border: 0; background: none; font-size: 18px; line-height: 1; cursor: pointer; color: inherit; padding: 0 2px; }
+    #pd9-stac-find .pd9-sf-hint:empty { display: none; }
+    #pd9-stac-find .pd9-sf-hint { margin-top: 5px; font-size: 12px; color: #667085; }
+    #pd9-stac-find .pd9-case-results:empty { display: none; }
+    #pd9-stac-find .pd9-case-results { margin-top: 8px; max-height: 45vh; overflow: auto; border-top: 1px solid var(--t-color-border, #dfe3e8); padding-top: 6px; }
+    #pd9-hub-sorted.pd9-hs-docked.pd9-sf-on .pd9-hs-wrap { display: none; }
+    #pd9-hub-sorted.pd9-hs-docked.pd9-sf-on #pd9-stac-find { flex: 1; min-height: 0; display: flex; flex-direction: column; border-bottom: 0; }
+    #pd9-hub-sorted.pd9-hs-docked.pd9-sf-on #pd9-stac-find .pd9-case-results { flex: 1; min-height: 0; max-height: none; }
+    #pd9-stac-find .pd9-case-status { display: flex; align-items: center; gap: 8px; font-weight: 600; margin-bottom: 4px; }
+    #pd9-stac-find .pd9-spin { width: 14px; height: 14px; border-radius: 50%; border: 2px solid #c9ced6; border-top-color: #1f2933; animation: pd9spin .8s linear infinite; }
+    #pd9-stac-find .pd9-case-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 1px; }
+    #pd9-stac-find .pd9-case-list a { display: flex; flex-direction: column; gap: 2px; padding: 6px 8px; border-radius: 6px; color: inherit; text-decoration: none; }
+    #pd9-stac-find .pd9-case-list a:hover, #pd9-stac-find .pd9-case-list a:focus-visible { background: var(--t-color-object-1-secondary, #eef2f7); outline: none; }
+    #pd9-stac-find .pd9-case-title { font-weight: 600; color: #2b7a78; }
+    #pd9-stac-find .pd9-case-details { font-size: 12px; opacity: .75; }
+    #pd9-stac-find .pd9-case-note { margin-top: 6px; font-size: 12px; opacity: .75; }
+    html.pd9-dark #pd9-stac-find .pd9-sf-row { background: #1b1f26; border-color: #2c323c; }
+    html.pd9-dark #pd9-stac-find input { color: #e6e9ee; }
+    @media (prefers-reduced-motion: reduce) { #pd9-casepanel, #pd9-hub-sorted.pd9-hs-docking { transition: none !important; } }
+    html.pd9-dark #pd9-hub-sorted tbody tr.pd9-row-open td { background: #17302d !important; }
+    html.pd9-dark #pd9-casepanel { background: #14171c; box-shadow: -24px 0 48px -24px rgba(0, 0, 0, .7); }
+    html.pd9-dark .pd9-cp-head { background: #191c22; border-color: #232830; }
+    html.pd9-dark .pd9-cp-title { color: #e6e9ee; }
+    html.pd9-dark .pd9-cp-btn { color: #a3aab6; }
+    html.pd9-dark .pd9-cp-loading, html.pd9-dark .pd9-cp-body iframe { background: #14171c; }
     /* ---------- What's new card ---------- */
     #pd9-whatsnew { position: fixed; left: 20px; bottom: 20px; z-index: 2147483001; width: 340px; max-width: calc(100vw - 40px); padding: 12px 14px 10px; border-radius: 12px;
       background: #fff; color: #1d2433; border: 1px solid #e4e7ec; box-shadow: 0 12px 32px -12px rgba(16,24,40,.28); font: 13px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
