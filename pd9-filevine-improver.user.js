@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PD9 Filevine Improver
 // @namespace    https://filevine.local/pd9-improver
-// @version      3.107.3
+// @version      3.113.2
 // @description  Faster notes, tasks, and case closing in Filevine for PD9.
 // @match        https://*.filevine.com/*
 // @match        https://*.filevineapp.com/*
@@ -347,6 +347,12 @@
   const $$ = (s, root = document) => [...root.querySelectorAll(s)];
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const isVisible = (el) => !!(el && el.getClientRects().length);
+  // Reload a frame in place (the refresh button on case windows, Stac view and previews).
+  function reloadFrame(frame) {
+    if (!frame) return;
+    try { frame.contentWindow.location.reload(); } catch (e) { const src = frame.src; frame.src = 'about:blank'; setTimeout(() => { frame.src = src; }, 30); }
+  }
+  const REFRESH_ICON = '<svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true"><path d="M19 12a7 7 0 1 1-2.05-4.95M19 4v4h-4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
   const norm = (t) => (t || '').trim().replace(/^#/, '').toLowerCase();
   const composerOf = (el) => (el && el.closest ? el.closest(COMPOSERS) : null);
   const inCase = () => /\/project\/\d+/.test(location.href);
@@ -910,11 +916,12 @@
   // Newest first. "v" is the Improver version that brought it; "staff" is the Staff
   // version. Leave one out to hide the item from that script.
   const WHATS_NEW = [
-    { v: '3.107.3', items: [
-      'Stac view: works like the old STAC layout. Click a case in the PD9 table and it opens on the right, while your case list stays on the left. At the top of the list, one search box filters your cases as you type. Press Enter to also search all of Filevine by name or case number. Esc or \u00D7 closes the case. Turn it off with the "Stac mode" box next to "Window mode".',
-      'In Stac view, Switch case opens the case on the right too. Tasks, Feed and Documents at the top open in a new tab, and Project Hub closes the case.',
-      'Benchmark now reuses the same Clerk tab each time. Ctrl click or middle click it to get a new tab.',
-      'The browser tab now shows the short case number, like "Filevine | 25-CF-3158".',
+    { v: '3.112.0', items: [
+      { top: true, t: 'Stac view: works like the old STAC layout. Click a case in the PD9 table and it opens on the right, while your case list stays on the left. At the top of the list, one search box filters your cases as you type. Press Enter to also search all of Filevine by name or case number. Esc or \u00D7 closes the case. Turn it off with the "Stac mode" box next to "Window mode".' },
+      'In Stac view, Switch case opens the case on the right too. Tasks and Feed at the top show on the left, in place of your cases. Click a case name in an item to open it on the right. Esc, \u00D7, or the same button again brings your cases back. Documents opens in a new tab, and Project Hub closes the case.',
+      'Seasonal theme: pick "Fall" under Theme in Improver Options for warm cream pages, rust buttons, and a deep green header.',
+      'Feed: Ctrl+click cards to select them (Shift+click selects a run), then press "Got it on all" in the bar at the bottom. A plain click still opens a card.',
+      'Filing Cabinet: in list view, "Expand all" next to the list/grid switch opens every folder, including folders inside folders. Click it again to close them all.',
     ] },
     // One list for everything new (October 13 and 14, 2026), so everyone sees it all together.
     { v: '3.105.1', items: [
@@ -964,7 +971,14 @@
     card.innerHTML = `
       <div class="pd9-wn-head"><b>What's new in the ${STAFF ? 'Staff script' : 'Improver'}</b><span class="pd9-wn-ver">v${escapeHtml(scriptVersion())}</span>
         <button type="button" class="pd9-wn-x" aria-label="Close">&#215;</button></div>
-      <ul>${items.map((t) => `<li>${escapeHtml(t)}</li>`).join('')}</ul>
+      <ul>${items.map((it) => {
+        // An item can be { top: true, t: '...' } to stand out. "Name: ..." gets a bold name.
+        const top = typeof it === 'object';
+        const t = top ? it.t : it;
+        const m = String(t).match(/^([^:]{2,30}):\s*(.*)$/s);
+        const body = m ? `<b>${escapeHtml(m[1])}</b>: ${escapeHtml(m[2])}` : escapeHtml(t);
+        return `<li${top ? ' class="pd9-wn-top"' : ''}>${body}</li>`;
+      }).join('')}</ul>
       <div class="pd9-wn-foot"><button type="button" class="pd9-wn-ok">Got it</button></div>`;
     const close = () => { card.classList.add('pd9-wn-out'); setTimeout(() => card.remove(), 200); };
     card.querySelector('.pd9-wn-x').addEventListener('click', close);
@@ -1112,6 +1126,8 @@
           <span class="pd9-grow"></span>
           <label class="pd9-zoomopt" title="How big things look inside case windows. Auto shrinks them to fit when Windows display scaling is above 100%.">Case window zoom
             <select class="pd9-zoomsel">${WIN_ZOOM_CHOICES.map(([v, t]) => `<option value="${v}">${t}</option>`).join('')}</select></label>
+          <label class="pd9-zoomopt" title="A seasonal color theme for Filevine. Dark mode wins when it is on.">Theme
+            <select class="pd9-seasonsel">${SEASONS.map(([v, t]) => `<option value="${v}">${t}</option>`).join('')}</select></label>
           <button type="button" class="pd9-btn pd9-cancel">Cancel</button>
           <button type="button" class="pd9-btn pd9-primary pd9-save">Save</button>
         </div>
@@ -1128,6 +1144,14 @@
       store.set(WIN_ZOOM_KEY, zoomSel.value);
       applyWinZoom();
       toast(zoomSel.value === 'auto' ? `Case windows: Auto (${Math.round(winZoom() * 100)}% on this screen)` : `Case windows: ${zoomSel.selectedOptions[0].textContent}`);
+    });
+    const seasonSel = q('.pd9-seasonsel');
+    seasonSel.value = seasonNow();
+    // Takes effect right away, like the zoom.
+    seasonSel.addEventListener('change', () => {
+      store.set(SEASON_KEY, seasonSel.value);
+      applySeason();
+      toast(seasonSel.value ? `${seasonSel.selectedOptions[0].textContent} theme on${darkOn() ? ' (shows when dark mode is off)' : ''}` : 'Seasonal theme off');
     });
     const ul = q('.pd9-list');
     const f = { label: q('[name=label]'), subject: q('[name=subject]'), type: q('[name=type]'), tag: q('[name=tag]'), body: q('[name=body]') };
@@ -3875,6 +3899,7 @@
     const words = String(r.clientName || '').trim().split(/\s+/).filter(Boolean);
     el.textContent = ((words[0] || '?')[0] + (words.length > 1 ? words[words.length - 1][0] : '')).toUpperCase();
     el.style.setProperty('--pd9-av', `var(--t-color-object-${avatarColor(r)}-primary, #1f7a77)`);
+    el.dataset.c = String(avatarColor(r)); // for seasonal themes
     return el;
   }
 
@@ -4986,6 +5011,7 @@
     w.innerHTML = `
       <header class="pd9-win-head">
         <span class="pd9-win-title"></span>
+        <button type="button" class="pd9-win-btn pd9-win-reload" title="Refresh" aria-label="Refresh">${REFRESH_ICON}</button>
         <button type="button" class="pd9-win-btn pd9-win-new" title="Open in a new tab" aria-label="Open in a new tab"><svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true"><path d="M14 5h5v5M19 5l-8 8M18 14v5H5V6h5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
         <button type="button" class="pd9-win-btn pd9-win-minbtn" title="Minimize" aria-label="Minimize"><svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true"><path d="M6 17h12" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></button>
         <button type="button" class="pd9-win-btn pd9-win-maxbtn" title="Maximize" aria-label="Maximize"><svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="1.5" fill="none" stroke="currentColor" stroke-width="2"/></svg></button>
@@ -5036,6 +5062,7 @@
     w.querySelector('.pd9-win-minbtn').addEventListener('click', () => minimizeWindow(w));
     w.querySelector('.pd9-win-maxbtn').addEventListener('click', () => toggleMax(w));
     w.querySelector('.pd9-win-x').addEventListener('click', () => closeWindow(w));
+    w.querySelector('.pd9-win-reload').addEventListener('click', () => reloadFrame(frame));
     w.querySelector('.pd9-win-new').addEventListener('click', () => window.open(w.dataset.href || frame.src, '_blank', 'noopener'));
     if (spare) return w;
     if (restore && restore.z) w.style.zIndex = restore.z, winZ = Math.max(winZ, restore.z);
@@ -5738,6 +5765,15 @@
     if (on || document.documentElement.classList.contains('pd9-was-dark')) setThemeAttr(on);
     document.documentElement.classList.toggle('pd9-was-dark', on);
     $$('[data-pd9-dark] .pd9-dark-state').forEach((el) => { el.textContent = on ? 'On' : 'Off'; });
+    applySeason();
+  }
+  // Seasonal color themes (Improver Options > Theme). Light themes, so dark mode wins.
+  const SEASON_KEY = 'pd9-season';
+  const SEASONS = [['', 'Default'], ['fall', 'Fall']];
+  const seasonNow = () => { const v = store.get(SEASON_KEY, ''); return SEASONS.some(([k]) => k === v) ? v : ''; };
+  function applySeason() {
+    const on = !DARK_SKIP && !darkOn() ? seasonNow() : '';
+    SEASONS.forEach(([k]) => { if (k) document.documentElement.classList.toggle(`pd9-season-${k}`, on === k); });
   }
   function toggleDark() {
     store.set(DARK_KEY, !darkOn());
@@ -5756,7 +5792,10 @@
   }, true);
   // Another tab (or the main page, for a case window) changed it: follow along.
   window.addEventListener('focus', () => applyDark());
-  setInterval(() => { if (document.documentElement.classList.contains('pd9-dark') !== darkOn()) applyDark(); }, 2000);
+  setInterval(() => {
+    if (document.documentElement.classList.contains('pd9-dark') !== darkOn()) applyDark();
+    else if (!!seasonNow() !== SEASONS.some(([k]) => k && document.documentElement.classList.contains(`pd9-season-${k}`)) && !darkOn()) applySeason();
+  }, 2000);
   applyDark();
 
   function addSwitchButton() {
@@ -5879,6 +5918,7 @@
           <button type="button" class="pd9-dp-btn pd9-dp-next" title="Next file (Down or Right arrow)" aria-label="Next file"><svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="M6 9l6 6 6-6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
           <span class="pd9-dp-title"></span>
           <span class="pd9-dp-count"></span>
+          <button type="button" class="pd9-dp-btn pd9-dp-reload" title="Refresh" aria-label="Refresh">${REFRESH_ICON}</button>
           <button type="button" class="pd9-dp-btn pd9-dp-tab" title="Open in a new tab" aria-label="Open in a new tab"><svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true"><path d="M14 5h5v5M19 5l-8 8M18 14v5H5V6h5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
           <button type="button" class="pd9-dp-btn pd9-dp-x" title="Close (Esc)" aria-label="Close preview"><svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true"><path d="M7 7l10 10M17 7L7 17" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></button>
         </header>
@@ -5889,6 +5929,7 @@
       $('.pd9-dp-x', panel).addEventListener('click', closeDocPreview);
       $('.pd9-dp-prev', panel).addEventListener('click', () => stepDocPreview(-1));
       $('.pd9-dp-next', panel).addEventListener('click', () => stepDocPreview(1));
+      $('.pd9-dp-reload', panel).addEventListener('click', () => reloadFrame($('.pd9-dp-body iframe', panel)));
       $('.pd9-dp-tab', panel).addEventListener('click', () => { if (docPrevId) window.open(docViewUrl(docPrevId), '_blank'); });
       // Drag the left edge to resize.
       const edge = $('.pd9-dp-edge', panel);
@@ -6471,6 +6512,7 @@
       <span class="pd9-cp-edge" title="Drag to resize" aria-hidden="true"></span>
       <header class="pd9-cp-head">
         <span class="pd9-cp-title"></span>
+        <button type="button" class="pd9-cp-btn pd9-cp-reload" title="Refresh" aria-label="Refresh">${REFRESH_ICON}</button>
         <button type="button" class="pd9-cp-btn pd9-cp-tab" title="Open in a new tab" aria-label="Open in a new tab"><svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true"><path d="M14 5h5v5M19 5l-8 8M18 14v5H5V6h5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
         <button type="button" class="pd9-cp-btn pd9-cp-x" title="Close (Esc)" aria-label="Close the case"><svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="M7 7l10 10M17 7L7 17" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></button>
       </header>
@@ -6480,6 +6522,7 @@
     side = { panel, frame, id: null, ready: false, open: false };
     frame.addEventListener('load', () => { side.ready = true; panel.classList.add('pd9-cp-loaded'); });
     $('.pd9-cp-x', panel).addEventListener('click', () => sideClose());
+    $('.pd9-cp-reload', panel).addEventListener('click', () => reloadFrame(frame));
     $('.pd9-cp-tab', panel).addEventListener('click', () => {
       let h = side.id ? caseHash(side.id) : '';
       try { h = frame.contentWindow.location.hash || h; } catch (e) { /* keep the case address */ }
@@ -6566,6 +6609,7 @@
       document.body.appendChild(ov);
       void ov.offsetWidth;
       ov.classList.add('pd9-hs-docked');
+      setTimeout(() => { if (side && side.open) Object.keys(LEFT_PANES).forEach((k) => stacPaneEnsure(k)); }, SIDE_MS + 300); // preload Tasks and Feed
       stacFindReset();
       stacFindEnsure(ov);
       drawOwnTable(ov);
@@ -6592,6 +6636,7 @@
   function sideClose() {
     if (!side || !side.open) return;
     side.open = false;
+    stacPaneHide();
     setTimeout(keepTabTitle, 0);
     const ov = document.getElementById('pd9-hub-sorted');
     side.panel.classList.remove('pd9-cp-show');
@@ -6701,6 +6746,78 @@
     $('.pd9-case-results', box).textContent = '';
   }
 
+  // ----- Stac view: Tasks or Feed on the left -----
+  // With a case open, the Tasks or Feed button at the top shows that Filevine
+  // page on the left, in place of the case list (no header, no filter column).
+  // Both load in the background when Stac view opens, so they show right away.
+  // Click a case name in an item and it opens on the right. \u00d7, Esc, the same
+  // button again, or Project Hub brings the case list back.
+  const LEFT_PANES = {
+    tasks: { label: 'Tasks', hash: '#/tasks', frame: 'pd9-tasks' },
+    feed: { label: 'Feed', hash: '#/feed', frame: 'pd9-feed' },
+  };
+  const stacPanes = {}; // kind -> { pane, frame }
+  const leftPaneKind = (href) => Object.keys(LEFT_PANES).find((k) => new RegExp(`${LEFT_PANES[k].hash.replace('/', '\\/')}(?![a-z])`, 'i').test(String(href || ''))) || '';
+  if (IN_FRAME && Object.values(LEFT_PANES).some((k) => k.frame === window.name)) {
+    document.documentElement.classList.add('pd9-in-leftpane');
+    document.addEventListener('click', (e) => {
+      const a = e.target.closest && e.target.closest('a[href*="#/project/"]');
+      if (!a || e.button !== 0 || e.ctrlKey || e.metaKey || e.shiftKey || e.altKey) return;
+      const id = (a.getAttribute('href').match(/#\/project\/(\d+)/) || [])[1];
+      if (!id) return;
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      const title = (a.getAttribute('aria-label') || a.textContent || '').replace(/^\s*go to project:\s*/i, '').trim();
+      window.parent.postMessage({ pd9: 'openCase', id, title }, location.origin);
+    }, true);
+    document.addEventListener('keydown', (e) => {
+      if (e.key !== 'Escape' || e.defaultPrevented || isTyping(e)) return;
+      if (document.querySelector('.pd9-overlay, [role="dialog"]:not([hidden]), .modal.in, .modal.show')) return;
+      window.parent.postMessage({ pd9: 'closeLeftPane' }, location.origin);
+    });
+  }
+  // Always this site's own address, with the page part (#/tasks..., #/feed...) from the button.
+  const leftPaneUrl = (kind, href) => {
+    const k = LEFT_PANES[kind];
+    const src = href || ($(`a.primary-nav-item[href*="${k.hash}"]`) || {}).href || '';
+    const h = String(src).match(/#\/[a-z]+.*$/i);
+    return `${location.origin}${location.pathname}${h && leftPaneKind(h[0]) === kind ? h[0] : k.hash}`;
+  };
+  function stacPaneEnsure(kind, href) {
+    if (stacPanes[kind]) return stacPanes[kind];
+    const k = LEFT_PANES[kind];
+    const pane = document.createElement('section');
+    pane.className = 'pd9-leftpane';
+    pane.dataset.kind = kind;
+    pane.setAttribute('aria-label', k.label);
+    pane.innerHTML = `
+      <header class="pd9-cp-head">
+        <span class="pd9-cp-title">${k.label}</span>
+        <button type="button" class="pd9-cp-btn pd9-tp-reload" title="Refresh" aria-label="Refresh">${REFRESH_ICON}</button>
+        <button type="button" class="pd9-cp-btn pd9-tp-tab" title="Open ${k.label} in a new tab" aria-label="Open ${k.label} in a new tab"><svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true"><path d="M14 5h5v5M19 5l-8 8M18 14v5H5V6h5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+        <button type="button" class="pd9-cp-btn pd9-tp-x" title="Back to your cases (Esc)" aria-label="Back to your cases"><svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="M7 7l10 10M17 7L7 17" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></button>
+      </header>
+      <div class="pd9-cp-body"><iframe name="${k.frame}" title="${k.label}"></iframe></div>`;
+    document.body.appendChild(pane);
+    const frame = $('iframe', pane);
+    frame.src = leftPaneUrl(kind, href);
+    stacPanes[kind] = { pane, frame };
+    $('.pd9-tp-x', pane).addEventListener('click', () => stacPaneHide());
+    $('.pd9-tp-reload', pane).addEventListener('click', () => reloadFrame(frame));
+    $('.pd9-tp-tab', pane).addEventListener('click', () => window.open(leftPaneUrl(kind), '_blank'));
+    return stacPanes[kind];
+  }
+  const stacPaneShown = () => Object.keys(stacPanes).find((k) => stacPanes[k].pane.classList.contains('pd9-tp-show')) || '';
+  function stacPaneShow(kind, href) {
+    Object.keys(stacPanes).forEach((k) => { if (k !== kind) stacPanes[k].pane.classList.remove('pd9-tp-show'); });
+    stacPaneEnsure(kind, href).pane.classList.add('pd9-tp-show');
+    document.documentElement.classList.add('pd9-leftpane-open');
+  }
+  function stacPaneHide() {
+    Object.values(stacPanes).forEach((t) => t.pane.classList.remove('pd9-tp-show'));
+    document.documentElement.classList.remove('pd9-leftpane-open');
+  }
+
   // Open a case on the right from anywhere on the Project Hub (switcher, search results).
   const stacActive = () => sidePanel() && onHub();
   function stacOpenCase(id, title = '') {
@@ -6742,7 +6859,11 @@
   }
   if (!IN_FRAME && !STAFF) {
     window.addEventListener('message', (e) => {
-      if (e.origin === location.origin && e.data && e.data.pd9 === 'closePanel' && side && e.source === side.frame.contentWindow) sideClose();
+      if (e.origin !== location.origin || !e.data) return;
+      if (e.data.pd9 === 'closePanel' && side && e.source === side.frame.contentWindow) sideClose();
+      const fromPane = Object.values(stacPanes).some((t) => e.source === t.frame.contentWindow);
+      if (fromPane && e.data.pd9 === 'closeLeftPane') stacPaneHide();
+      if (fromPane && e.data.pd9 === 'openCase' && e.data.id && side && side.open) stacOpenCase(String(e.data.id), String(e.data.title || ''));
     });
   }
 
@@ -6750,7 +6871,7 @@
     document.addEventListener('keydown', (e) => {
       if (e.key !== 'Escape' || !side || !side.open || isTyping(e) || document.querySelector('.pd9-overlay')) return;
       e.preventDefault();
-      sideClose();
+      if (stacPaneShown()) stacPaneHide(); else sideClose();
     });
     window.addEventListener('resize', () => {
       if (!side || !side.open) return;
@@ -6773,15 +6894,169 @@
       if (side && side.open && !onHub()) sideClose();
     });
     // Header buttons while a case is open: Project Hub closes the case; Tasks,
-    // Feed and Documents open in a new tab so your spot here stays put.
+    // Documents opens in a new tab so your spot here stays put. Tasks and Feed
+    // open on the left, in place of the case list.
     document.addEventListener('click', (e) => {
       const a = e.target.closest && e.target.closest('a.primary-nav-item[href]');
       if (!a || !side || !side.open || e.button !== 0 || e.ctrlKey || e.metaKey || e.shiftKey) return;
       e.preventDefault();
       e.stopImmediatePropagation();
-      if (/#\/projecthub/i.test(a.getAttribute('href'))) sideClose();
+      const href = a.getAttribute('href');
+      const kind = leftPaneKind(href);
+      if (/#\/projecthub/i.test(href)) { if (stacPaneShown()) stacPaneHide(); else sideClose(); }
+      else if (kind) { if (stacPaneShown() === kind) stacPaneHide(); else stacPaneShow(kind, a.href); }
       else window.open(a.href, '_blank');
     }, true);
+  }
+
+  // ---------- Feed: Ctrl+click cards to select them, then "Got it" on all at once ----------
+  // A plain click works as usual. Ctrl+click (Cmd on a Mac) selects or
+  // unselects a card; Shift+click selects every card from the last one picked.
+  // A bar at the bottom marks every selected card "Got it".
+  const onFeedPage = () => /^#\/feed/i.test(location.hash);
+  const FEED_CARD = '.activity-item-component';
+  let feedLastPick = null;
+  const feedCards = () => $$(FEED_CARD).filter(isVisible);
+  const feedPicked = () => $$(`${FEED_CARD}.pd9-feed-picked`);
+  window.addEventListener('click', (e) => {
+    if (!onFeedPage() || e.button !== 0 || !(e.ctrlKey || e.metaKey || e.shiftKey)) return;
+    const card = e.target.closest && e.target.closest(FEED_CARD);
+    if (!card) return;
+    const ctl = e.target.closest('a, button, input, textarea, select, label, [contenteditable="true"], [role="button"], [role="menuitem"], [role="checkbox"]');
+    if (ctl && ctl !== card) return; // links, the check mark, the menu, the author... work as usual
+    if (e.shiftKey) { try { window.getSelection().removeAllRanges(); } catch (err) { /* ignore */ } }
+    e.preventDefault();
+    e.stopImmediatePropagation();
+    if (e.shiftKey && !(e.ctrlKey || e.metaKey) && feedLastPick && feedLastPick.isConnected) {
+      const all = feedCards();
+      const [a, b] = [all.indexOf(feedLastPick), all.indexOf(card)].sort((x, y) => x - y);
+      if (a >= 0 && b >= 0) all.slice(a, b + 1).forEach((c) => c.classList.add('pd9-feed-picked'));
+    } else {
+      card.classList.toggle('pd9-feed-picked');
+    }
+    feedLastPick = card;
+    drawFeedBar();
+  }, true);
+  // Shift+click picks a run of cards; don't let it select text too.
+  window.addEventListener('mousedown', (e) => {
+    if (e.shiftKey && e.button === 0 && onFeedPage() && e.target.closest && e.target.closest(FEED_CARD) && !e.target.closest('a, button, input, textarea, [contenteditable="true"]')) e.preventDefault();
+  }, true);
+  function drawFeedBar() {
+    const picked = feedPicked();
+    let bar = document.getElementById('pd9-feedbar');
+    if (!picked.length || !onFeedPage()) { if (bar) bar.remove(); return; }
+    if (!bar) {
+      bar = document.createElement('div');
+      bar.id = 'pd9-feedbar';
+      bar.setAttribute('role', 'toolbar');
+      bar.setAttribute('aria-label', 'Selected feed items');
+      bar.innerHTML = `<span class="pd9-fb-count"></span>
+        <button type="button" class="pd9-fb-got"><svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg><span>Got it on all</span></button>
+        <button type="button" class="pd9-fb-all">Select all</button>
+        <button type="button" class="pd9-fb-clear">Clear</button>`;
+      document.body.appendChild(bar);
+      $('.pd9-fb-clear', bar).addEventListener('click', () => { feedPicked().forEach((c) => c.classList.remove('pd9-feed-picked')); drawFeedBar(); });
+      $('.pd9-fb-all', bar).addEventListener('click', () => { feedCards().forEach((c) => c.classList.add('pd9-feed-picked')); drawFeedBar(); });
+      $('.pd9-fb-got', bar).addEventListener('click', async () => {
+        const btn = $('.pd9-fb-got', bar);
+        const cards = feedPicked();
+        btn.disabled = true;
+        let done = 0;
+        for (const c of cards) {
+          const got = c.querySelector('button[aria-label="Got It" i], button[aria-label="Got it" i]');
+          if (got && !got.disabled) { got.click(); done += 1; await sleep(250); }
+          c.classList.remove('pd9-feed-picked');
+        }
+        btn.disabled = false;
+        drawFeedBar();
+        toast(done ? `Marked ${done} item${done === 1 ? '' : 's'} "Got it".` : 'None of those items had a "Got it" check mark left.');
+      });
+    }
+    $('.pd9-fb-count', bar).textContent = `${picked.length} selected`;
+  }
+  function addFeedPicking() {
+    if (!onFeedPage()) { document.getElementById('pd9-feedbar')?.remove(); return; }
+    if (feedPicked().length || document.getElementById('pd9-feedbar')) drawFeedBar();
+  }
+  window.addEventListener('hashchange', () => { if (!onFeedPage()) document.getElementById('pd9-feedbar')?.remove(); });
+
+  // ---------- Filing Cabinet: expand or collapse every folder (list view) ----------
+  // A button next to the list/grid switch. It opens every folder, including
+  // folders inside folders, scrolling down the list as it goes so it reaches
+  // the ones further down. Click again to close them all.
+  let folderBusy = false;
+  function folderGrid() {
+    const toggle = $('.dlfb-thumbnails-toggle');
+    if (!toggle) return null;
+    const listOn = [...toggle.querySelectorAll('button')].some((b) => /view_list/.test(b.textContent) && b.classList.contains('fvs-button--primary'));
+    if (!listOn) return null;
+    return [...document.querySelectorAll('.ag-root-wrapper')].find((g) => isVisible(g) && g.querySelector('.ag-row-group')) || null;
+  }
+  async function walkFolders(grid, open) {
+    const viewport = $('.ag-body-viewport', grid);
+    const pick = open ? '.ag-row-group-contracted .ag-group-contracted:not(.ag-hidden)' : '.ag-row-group-expanded .ag-group-expanded:not(.ag-hidden)';
+    if (viewport) viewport.scrollTop = 0;
+    let idle = 0;
+    for (let i = 0; i < 400 && idle < 4; i += 1) {
+      const toggles = [...grid.querySelectorAll(pick)].filter(isVisible);
+      if (toggles.length) {
+        // Closing: deepest folders first, so their parents still get closed.
+        (open ? toggles : toggles.reverse()).forEach((t) => t.click());
+        idle = 0;
+        await sleep(open ? 350 : 150);
+        continue;
+      }
+      if (viewport && viewport.scrollTop + viewport.clientHeight < viewport.scrollHeight - 2) {
+        viewport.scrollTop += Math.max(100, viewport.clientHeight * 0.8);
+        await sleep(200);
+        continue;
+      }
+      idle += 1;
+      await sleep(300); // folders still loading their contents
+    }
+    if (viewport) viewport.scrollTop = 0;
+  }
+  function addExpandFolders() {
+    const grid = folderGrid();
+    let btn = document.getElementById('pd9-folders-btn');
+    if (!grid) { if (btn && !folderBusy) btn.remove(); return; }
+    const toggle = $('.dlfb-thumbnails-toggle');
+    // "Collapse all" only once every folder showing is open.
+    const anyOpen = !!grid.querySelector('.ag-row-group-expanded') && !grid.querySelector('.ag-row-group-contracted');
+    // Look like Filevine's own buttons: copy the classes from the list/grid switch.
+    const like = toggle.querySelector('button.fvs-button');
+    const iconCls = (like && like.querySelector('i') && like.querySelector('i').className) || 'mdis';
+    const textCls = (like && like.querySelector('.text-container') && like.querySelector('.text-container').className) || 'text-container';
+    const face = (icon, text) => `<i aria-hidden="true" class="${escapeAttr(iconCls)}" data-testid="material-icon" style="--icon-color: var(--t-color-text-icon);">${icon}</i> <div class="${escapeAttr(textCls)}"><span>${escapeHtml(text)}</span></div>`;
+    const label = (open) => face(open ? 'unfold_less' : 'unfold_more', open ? 'Collapse all' : 'Expand all');
+    if (!btn) {
+      btn = document.createElement('button');
+      btn.id = 'pd9-folders-btn';
+      btn.type = 'button';
+      btn.className = `${like ? like.className.replace(/fvs-button--(primary|secondary|icon-only)/g, '').replace(/fvs-button--tertiary/g, '') : 'fvs-button'} fvs-button--tertiary pd9-folders-btn`.replace(/\s+/g, ' ').trim();
+      btn.addEventListener('click', async (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const g = folderGrid();
+        if (!g || folderBusy) return;
+        const open = btn.dataset.state !== 'open';
+        folderBusy = true;
+        btn.disabled = true;
+        btn.innerHTML = face('hourglass_empty', open ? 'Opening folders...' : 'Closing folders...');
+        try { await walkFolders(g, open); } finally {
+          folderBusy = false;
+          btn.disabled = false;
+          btn.dataset.state = open ? 'open' : '';
+          btn.innerHTML = label(open);
+        }
+      });
+    }
+    if (btn.nextElementSibling !== toggle) toggle.before(btn);
+    if (!folderBusy) {
+      const state = anyOpen ? 'open' : '';
+      if (btn.dataset.state !== state || !btn.innerHTML) { btn.dataset.state = state; btn.innerHTML = label(anyOpen); }
+    }
+    btn.title = btn.dataset.state === 'open' ? 'Close every folder' : 'Open every folder, including folders inside folders';
   }
 
   // ---------- Intake and Request tabs: small helpers ----------
@@ -6960,6 +7235,8 @@
     addDocPreview();
     addFormHelpers();
     addFeedSearch();
+    addExpandFolders();
+    addFeedPicking();
     for (const form of $$(COMPOSERS)) {
       const layout = $(SEL.layout, form);
       if (layout && !$('.fvqn-wrap', form)) layout.parentNode.insertBefore(buildBar(form), layout);
@@ -7747,6 +8024,135 @@
     .pd9-tag-edit .pd9-te-note:empty { display: none; }
     .pd9-tag-edit .pd9-te-bad { color: #b42318; }
     .pd9-tag-edit.pd9-te-busy .pd9-te-list, .pd9-tag-edit.pd9-te-busy .pd9-te-on { opacity: .5; pointer-events: none; }
+    /* ---------- Fall theme ----------
+       Tokens first (--fall-*), then Filevine's theme colors and the Improver's own
+       parts mapped onto them. Change a token to change it everywhere. */
+    :root.pd9-season-fall {
+      --fall-bg-page: #FAF7F2; --fall-bg-surface: #FFFFFF; --fall-bg-raised: #FFFFFF; --fall-bg-hover: #F3EEE6; --fall-bg-selected: #F3E3D3;
+      --fall-border: #E8E2D9; --fall-border-strong: #D6CEC2;
+      --fall-text: #2B2622; --fall-text-secondary: #6B625A; --fall-text-faint: #8C8279; --fall-text-disabled: #B5ACA2;
+      --fall-accent: #B4532A; --fall-accent-hover: #96421F; --fall-on-accent: #FFFFFF; --fall-focus: #2E3B33;
+      --fall-inverse-bg: #2E3B33; --fall-inverse-text: #FFFFFF; --fall-inverse-accent: #F3E3D3;
+      --fall-success: #3E5733; --fall-success-bg: #E4EDDF; --fall-warning: #6E5214; --fall-warning-bg: #F5E8C8;
+      --fall-danger: #7A2C24; --fall-danger-bg: #F4DEDB; --fall-soon: #96421F;
+      --fall-b1: #B4532A; --fall-b2: #2E3B33; --fall-b3: #5B7F4B; --fall-b4: #8A6A1F; --fall-b5: #7A4E6B;
+    }
+    :root.pd9-season-fall[style] {
+      /* Backgrounds */
+      --t-color-background-tertiary: var(--fall-bg-page); --t-color-background-alternate: var(--fall-bg-page); --t-color-background-secondary: var(--fall-bg-page);
+      --t-color-background-primary: var(--fall-bg-surface); --t-color-background-content: var(--fall-bg-surface); --t-color-background-page-title: var(--fall-bg-surface);
+      --t-color-background-menu: var(--fall-bg-raised); --t-color-background-menu-item-rest: var(--fall-bg-raised); --t-color-background-dropdown-primary: var(--fall-bg-raised);
+      --t-color-background-dialog: var(--fall-bg-raised); --t-color-background-drawer: var(--fall-bg-raised); --t-color-background-drawer-elevated: var(--fall-bg-raised);
+      --t-color-background-text-input: var(--fall-bg-surface); --t-color-background-select: var(--fall-bg-surface); --t-color-background-datepicker: var(--fall-bg-raised);
+      --t-color-background-menu-item-hover: var(--fall-bg-hover); --t-color-background-tab-hover: var(--fall-bg-hover); --t-color-background-hover-row-ag-grid: var(--fall-bg-hover);
+      --t-color-background-row-selected-ag-grid: var(--fall-bg-selected); --t-color-background-secondary-nav-item-active: var(--fall-bg-selected); --t-color-background-brand: var(--fall-bg-selected);
+      --t-color-background-ag-grid: var(--fall-bg-surface); --t-color-background-header-ag-grid: var(--fall-bg-page); --t-color-background-subheader-ag-grid: var(--fall-bg-surface);
+      --t-color-background-toolbar-subheader-ag-grid: var(--fall-bg-page); --t-color-background-control-panel-ag-grid: var(--fall-bg-page); --t-color-background-paging-panel-ag-grid: var(--fall-bg-page);
+      --t-color-background-tab-unselected: var(--fall-bg-surface);
+      /* Header (inverse) */
+      --t-color-background-header: var(--fall-inverse-bg); --t-color-background-logo-badge: var(--fall-inverse-bg);
+      --t-color-background-nav-item-active: var(--fall-inverse-accent); --t-color-background-nav-item-active-hover: var(--fall-inverse-accent);
+      --t-color-text-nav-item-active: var(--fall-inverse-bg); --t-color-text-nav-item-active-hover: var(--fall-inverse-bg);
+      --t-color-text-nav-item-rest: var(--fall-inverse-text); --t-color-text-nav-item-hover: var(--fall-inverse-accent); --t-color-background-nav-item-hover: rgb(255 255 255 / 10%);
+      /* Accent: buttons and key highlights */
+      --t-color-background-button-primary-rest: var(--fall-accent); --t-color-background-button-primary-hover: var(--fall-accent-hover); --t-color-background-button-primary-active: var(--fall-accent-hover);
+      --t-color-background-button-primary-disabled: var(--fall-text-disabled);
+      --t-color-border-button-primary-rest: var(--fall-accent); --t-color-border-button-primary-hover: var(--fall-accent-hover); --t-color-border-button-primary-active: var(--fall-accent-hover);
+      --t-color-text-button-primary-rest: var(--fall-on-accent); --t-color-text-button-primary-hover: var(--fall-on-accent); --t-color-text-button-primary-active: var(--fall-on-accent);
+      --t-color-text-button-secondary-rest: var(--fall-accent); --t-color-text-button-secondary-hover: var(--fall-accent-hover); --t-color-text-button-secondary-active: var(--fall-accent-hover);
+      --t-color-border-button-secondary-rest: var(--fall-border-strong); --t-color-border-button-secondary-hover: var(--fall-accent); --t-color-border-button-secondary-active: var(--fall-accent-hover);
+      --t-color-background-button-secondary-hover: var(--fall-bg-hover);
+      --t-color-text-button-inline-colored-rest: var(--fall-accent); --t-color-text-button-inline-colored-hover: var(--fall-accent-hover); --t-color-text-button-inline-colored-active: var(--fall-accent-hover);
+      --t-color-background-control-active: var(--fall-accent); --t-color-background-control-active-hover: var(--fall-accent-hover); --t-color-background-control-active-disabled: var(--fall-text-disabled);
+      --t-color-background-toggle-active: var(--fall-accent); --t-color-background-toggle-active-hover: var(--fall-accent-hover); --t-color-background-toggle-active-disabled: var(--fall-text-disabled);
+      --t-color-background-checkbox: var(--fall-accent); --t-color-background-checkbox-hover: var(--fall-accent-hover);
+      --t-color-background-tab-selected: var(--fall-accent); --t-color-border-tab-selected: var(--fall-accent); --t-color-border-underline-tab-selected-ag-grid: var(--fall-accent);
+      --t-color-background-datepicker-selected: var(--fall-accent); --t-color-background-datepicker-selected-hover: var(--fall-accent-hover); --t-color-background-datepicker-hover: var(--fall-bg-selected);
+      --t-color-background-timepicker-selected: var(--fall-accent); --t-color-background-timepicker-selected-hover: var(--fall-accent-hover); --t-color-background-dropdown-secondary: var(--fall-accent);
+      --t-color-border-datepicker-hover: var(--fall-accent); --t-color-border-datepicker-selected-hover: var(--fall-accent-hover); --t-color-border-select-open: var(--fall-accent);
+      --t-color-border-range-selection-ag-grid: var(--fall-accent); --t-color-text-cell-icon-focused-ag-grid: var(--fall-accent); --t-color-border-selected-theme-switcher: var(--fall-accent);
+      --t-color-text-link-rest: var(--fall-accent); --t-color-text-link-visited: var(--fall-accent); --t-color-text-link-hover: var(--fall-accent-hover); --t-color-text-link-active: var(--fall-accent-hover);
+      --t-color-text-link-disabled: var(--fall-text-disabled);
+      --t-color-text-brand: var(--fall-accent); --t-color-border-brand: var(--fall-accent); --t-color-text-tab-selected: var(--fall-accent); --t-color-text-secondary-nav-item-active: var(--fall-accent-hover);
+      /* Focus */
+      --t-color-border-text-input-focused: var(--fall-focus); --t-color-font-text-input-icon-focus: var(--fall-focus); --t-color-border-text-input-readonly-focused: var(--fall-border-strong);
+      --t-color-border-toggle-focused-halo: var(--fall-focus); --t-color-border-checkbox-focused-halo: var(--fall-focus); --t-color-border-segmented-control-focused-halo: var(--fall-focus);
+      --t-color-border-primary-nav-item-focused-halo: var(--fall-inverse-accent);
+      /* Borders */
+      --t-color-border-primary: var(--fall-border); --t-color-border-secondary: var(--fall-border); --t-color-border-tertiary: var(--fall-border-strong);
+      --t-color-border-ag-grid: var(--fall-border); --t-color-border-secondary-ag-grid: var(--fall-border); --t-color-border-drawer: var(--fall-border); --t-color-border-page-title: var(--fall-border);
+      --t-color-border-text-input-unfocused: var(--fall-border-strong); --t-color-border-select-closed: var(--fall-border-strong);
+      /* Text */
+      --t-color-text-primary: var(--fall-text); --t-color-text-secondary: var(--fall-text-secondary); --t-color-text-tertiary: var(--fall-text-faint); --t-color-text-disabled: var(--fall-text-disabled);
+      --t-color-text-icon: var(--fall-text-secondary); --t-color-text-tab-unselected: var(--fall-text-secondary); --t-color-text-tab-hover: var(--fall-text);
+      /* Status */
+      --t-color-text-success: var(--fall-success); --t-color-icon-alert-success: var(--fall-success); --t-color-icon-snackbar-success: var(--fall-success);
+      --t-color-background-alert-success: var(--fall-success-bg); --t-color-border-alert-success: var(--fall-success);
+      --t-color-text-warning: var(--fall-warning); --t-color-icon-alert-warning: var(--fall-warning); --t-color-icon-snackbar-warning: var(--fall-warning);
+      --t-color-background-alert-warning: var(--fall-warning-bg); --t-color-border-alert-warning: var(--fall-warning);
+      --t-color-text-error: var(--fall-danger); --t-color-icon-alert-danger: var(--fall-danger); --t-color-icon-snackbar-danger: var(--fall-danger);
+      --t-color-background-alert-danger: var(--fall-danger-bg); --t-color-border-alert-danger: var(--fall-danger);
+      background: var(--fall-bg-page);
+    }
+    html.pd9-season-fall, html.pd9-season-fall body { background: var(--fall-bg-page) !important; color: var(--fall-text); }
+    html.pd9-season-fall .fvs-primary-nav-item a .mdis { --icon-color: currentColor !important; color: inherit !important; }
+    html.pd9-season-fall .fvs-primary-nav-item--active a { color: var(--fall-inverse-bg) !important; }
+    /* A little jack-o'-lantern after the Filevine logo, in the logo's own color */
+    html.pd9-season-fall a[data-testid="app-header-logo-link"] { display: inline-flex; align-items: center; gap: 7px; }
+    html.pd9-season-fall a[data-testid="app-header-logo-link"]::after { content: ""; width: 22px; height: 22px; flex: none; background-color: var(--t-color-logo, #fff);
+      -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cdefs%3E%3Cmask id='m'%3E%3Crect width='24' height='24' fill='%23fff'/%3E%3Cpath d='M6.2 12.4h3.8L8.1 9.1z M14 12.4h3.8l-1.9-3.3z M11 14.6h2l-1-1.7z' fill='%23000'/%3E%3Cpath d='M5.6 15.6Q12 22 18.4 15.6l-1.7.8-1 1.4-1.2-1.1-1.3 1.5-1.2-1.3-1.2 1.3-1.3-1.5-1.2 1.1-1-1.4z' fill='%23000'/%3E%3C/mask%3E%3C/defs%3E%3Cg mask='url(%23m)' fill='%23fff'%3E%3Cellipse cx='7.6' cy='14.6' rx='5.6' ry='7.4'/%3E%3Cellipse cx='16.4' cy='14.6' rx='5.6' ry='7.4'/%3E%3Cellipse cx='12' cy='14.6' rx='6.2' ry='8'/%3E%3Cpath d='M11.1 7.4l.5-4.4q.2-1 1.2-.7l.9.3-.8 4.8z'/%3E%3C/g%3E%3C/svg%3E") center / contain no-repeat; mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cdefs%3E%3Cmask id='m'%3E%3Crect width='24' height='24' fill='%23fff'/%3E%3Cpath d='M6.2 12.4h3.8L8.1 9.1z M14 12.4h3.8l-1.9-3.3z M11 14.6h2l-1-1.7z' fill='%23000'/%3E%3Cpath d='M5.6 15.6Q12 22 18.4 15.6l-1.7.8-1 1.4-1.2-1.1-1.3 1.5-1.2-1.3-1.2 1.3-1.3-1.5-1.2 1.1-1-1.4z' fill='%23000'/%3E%3C/mask%3E%3C/defs%3E%3Cg mask='url(%23m)' fill='%23fff'%3E%3Cellipse cx='7.6' cy='14.6' rx='5.6' ry='7.4'/%3E%3Cellipse cx='16.4' cy='14.6' rx='5.6' ry='7.4'/%3E%3Cellipse cx='12' cy='14.6' rx='6.2' ry='8'/%3E%3Cpath d='M11.1 7.4l.5-4.4q.2-1 1.2-.7l.9.3-.8 4.8z'/%3E%3C/g%3E%3C/svg%3E") center / contain no-repeat; }
+    html.pd9-season-fall ::selection { background: var(--fall-bg-selected); }
+    html.pd9-season-fall ::placeholder { color: var(--fall-text-faint); }
+    html.pd9-season-fall .btn-primary { background-color: var(--fall-accent) !important; border-color: var(--fall-accent) !important; color: var(--fall-on-accent) !important; }
+    html.pd9-season-fall .btn-primary:hover, html.pd9-season-fall .btn-primary:focus { background-color: var(--fall-accent-hover) !important; border-color: var(--fall-accent-hover) !important; }
+    html.pd9-season-fall .text-danger { color: var(--fall-danger) !important; }
+    html.pd9-season-fall .text-success { color: var(--fall-success) !important; }
+    html.pd9-season-fall .text-warning { color: var(--fall-warning) !important; }
+    /* The Improver's own parts */
+    html.pd9-season-fall .pd9-overlay .pd9-primary, html.pd9-season-fall .pd9-panel .pd9-primary, html.pd9-season-fall #pd9-case .pd9-primary, html.pd9-season-fall #pd9-adv .pd9-primary,
+    html.pd9-season-fall .pd9-wn-ok { background: var(--fall-accent) !important; border-color: var(--fall-accent) !important; color: var(--fall-on-accent) !important; }
+    html.pd9-season-fall .pd9-overlay .pd9-primary:hover, html.pd9-season-fall .pd9-wn-ok:hover { background: var(--fall-accent-hover) !important; border-color: var(--fall-accent-hover) !important; }
+    html.pd9-season-fall .pd9-dialog, html.pd9-season-fall #pd9-case, html.pd9-season-fall #pd9-whatsnew { background: var(--fall-bg-raised); color: var(--fall-text); border-color: var(--fall-border); }
+    html.pd9-season-fall #pd9-hub-sorted { --ink: var(--fall-text); --slate: var(--fall-text-secondary); --line: var(--fall-border); --head: var(--fall-bg-page); --accent: var(--fall-accent); --soon: var(--fall-soon); background: var(--fall-bg-surface); }
+    html.pd9-season-fall #pd9-hub-sorted td a { color: var(--fall-accent); }
+    html.pd9-season-fall #pd9-hub-sorted tbody tr:hover td { background: var(--fall-bg-hover); }
+    html.pd9-season-fall #pd9-hub-sorted, html.pd9-season-fall #pd9-casepanel, html.pd9-season-fall .pd9-leftpane { border-color: var(--fall-border); }
+    html.pd9-season-fall .pd9-cp-head { background: var(--fall-bg-page); border-color: var(--fall-border); color: var(--fall-text); }
+    html.pd9-season-fall .pd9-cp-btn { color: var(--fall-text-secondary); }
+    html.pd9-season-fall .pd9-cp-btn:hover { background: var(--fall-bg-hover); color: var(--fall-text); }
+    html.pd9-season-fall #pd9-hub-sorted tr.pd9-row-open td { background: var(--fall-bg-selected) !important; }
+    html.pd9-season-fall #pd9-hub-sorted tr.pd9-row-open td:nth-child(2) { box-shadow: inset 3px 0 0 var(--fall-accent); }
+    html.pd9-season-fall #pd9-stac-find .pd9-sf-row { border-color: var(--fall-border-strong); color: var(--fall-text-faint); }
+    html.pd9-season-fall #pd9-stac-find .pd9-sf-row:focus-within { border-color: var(--fall-focus); box-shadow: 0 0 0 3px rgb(46 59 51 / 15%); }
+    html.pd9-season-fall #pd9-stac-find .pd9-sf-hint, html.pd9-season-fall #pd9-stac-find .pd9-case-details { color: var(--fall-text-secondary); }
+    html.pd9-season-fall #pd9-stac-find .pd9-case-list a:hover, html.pd9-season-fall #pd9-case .pd9-case-list a:hover { background: var(--fall-bg-hover); }
+    html.pd9-season-fall #pd9-stac-find .pd9-case-title, html.pd9-season-fall #pd9-case .pd9-case-title { color: var(--fall-accent); }
+    html.pd9-season-fall .activity-item-component.pd9-feed-picked { box-shadow: inset 0 0 0 2px var(--fall-accent); background: var(--fall-bg-selected) !important; }
+    html.pd9-season-fall #pd9-feedbar { background: var(--fall-inverse-bg); color: var(--fall-inverse-text); }
+    html.pd9-season-fall #pd9-feedbar button { background: rgb(255 255 255 / 12%); }
+    html.pd9-season-fall #pd9-feedbar button:hover { background: rgb(255 255 255 / 20%); }
+    html.pd9-season-fall #pd9-feedbar .pd9-fb-got { background: var(--fall-inverse-accent); color: var(--fall-inverse-bg); }
+    html.pd9-season-fall #pd9-feedbar .pd9-fb-got:hover { background: #FFFFFF; }
+    html.pd9-season-fall #pd9-whatsnew li.pd9-wn-top { background: var(--fall-bg-selected); border-left-color: var(--fall-accent); }
+    html.pd9-season-fall #pd9-whatsnew .pd9-wn-ver, html.pd9-season-fall #pd9-whatsnew .pd9-wn-x { color: var(--fall-text-faint); }
+    /* Name bubbles: the five fall bubble colors, white letters */
+    html.pd9-season-fall .fvs-avatar.fvs-avatar--color-1, html.pd9-season-fall #pd9-hub-sorted .pd9-av[data-c="1"] { background-color: var(--fall-b1) !important; }
+    html.pd9-season-fall .fvs-avatar.fvs-avatar--color-2, html.pd9-season-fall #pd9-hub-sorted .pd9-av[data-c="2"] { background-color: var(--fall-b2) !important; }
+    html.pd9-season-fall .fvs-avatar.fvs-avatar--color-3, html.pd9-season-fall #pd9-hub-sorted .pd9-av[data-c="3"] { background-color: var(--fall-b3) !important; }
+    html.pd9-season-fall .fvs-avatar.fvs-avatar--color-4, html.pd9-season-fall #pd9-hub-sorted .pd9-av[data-c="4"] { background-color: var(--fall-b4) !important; }
+    html.pd9-season-fall .fvs-avatar.fvs-avatar--color-5, html.pd9-season-fall #pd9-hub-sorted .pd9-av[data-c="5"] { background-color: var(--fall-b5) !important; }
+    html.pd9-season-fall .fvs-avatar.fvs-avatar--color-6, html.pd9-season-fall #pd9-hub-sorted .pd9-av[data-c="6"] { background-color: var(--fall-b1) !important; }
+    html.pd9-season-fall .fvs-avatar.fvs-avatar--color-7, html.pd9-season-fall #pd9-hub-sorted .pd9-av[data-c="7"] { background-color: var(--fall-b2) !important; }
+    html.pd9-season-fall .fvs-avatar.fvs-avatar--color-8, html.pd9-season-fall #pd9-hub-sorted .pd9-av[data-c="8"] { background-color: var(--fall-b3) !important; }
+    html.pd9-season-fall .fvs-avatar.fvs-avatar--color-9, html.pd9-season-fall #pd9-hub-sorted .pd9-av[data-c="9"] { background-color: var(--fall-b4) !important; }
+    html.pd9-season-fall .fvs-avatar.fvs-avatar--color-10, html.pd9-season-fall #pd9-hub-sorted .pd9-av[data-c="10"] { background-color: var(--fall-b5) !important; }
+    html.pd9-season-fall .fvs-avatar.fvs-avatar--color-11, html.pd9-season-fall #pd9-hub-sorted .pd9-av[data-c="11"] { background-color: var(--fall-b1) !important; }
+    html.pd9-season-fall .fvs-avatar.fvs-avatar--color-12, html.pd9-season-fall #pd9-hub-sorted .pd9-av[data-c="12"] { background-color: var(--fall-b2) !important; }
+    html.pd9-season-fall .fvs-avatar.fvs-avatar--color-13, html.pd9-season-fall #pd9-hub-sorted .pd9-av[data-c="13"] { background-color: var(--fall-b3) !important; }
+    html.pd9-season-fall .fvs-avatar.fvs-avatar--color-14, html.pd9-season-fall #pd9-hub-sorted .pd9-av[data-c="14"] { background-color: var(--fall-b4) !important; }
+    html.pd9-season-fall .fvs-avatar.fvs-avatar--color-15, html.pd9-season-fall #pd9-hub-sorted .pd9-av[data-c="15"] { background-color: var(--fall-b5) !important; }
+    html.pd9-season-fall .fvs-avatar.fvs-avatar--color-16, html.pd9-season-fall #pd9-hub-sorted .pd9-av[data-c="16"] { background-color: var(--fall-b1) !important; }
+    html.pd9-season-fall .fvs-avatar .name-layer, html.pd9-season-fall #pd9-hub-sorted .pd9-av { color: #FFFFFF !important; }
     /* ---------- Dark mode ----------
        Palette: canvas #0d0f13, surface #15181d, raised #1b1f25, hover #222730,
        line #262b33, line strong #343a44, text #e6e8ec, muted #a3aab6, faint #737b88, teal #2fbfae. */
@@ -8022,6 +8428,28 @@
     html.pd9-in-panel .app-header { display: none !important; }
     html.pd9-in-panel .crops-app-container { height: 100% !important; }
     #pd9-hub-sorted:not(.pd9-hs-docked) #pd9-stac-find { display: none; }
+    .pd9-folders-btn { margin-right: 8px; white-space: nowrap; }
+    .activity-item-component.pd9-feed-picked { box-shadow: inset 0 0 0 2px #2b7a78; background: #eef8f6 !important; border-radius: 8px; }
+    html.pd9-dark .activity-item-component.pd9-feed-picked { background: #16302e !important; }
+    #pd9-feedbar { position: fixed; z-index: 9500; left: 50%; bottom: 20px; transform: translateX(-50%); display: flex; align-items: center; gap: 8px; padding: 8px 10px 8px 16px; border-radius: 12px;
+      background: #14171c; color: #e6e9ee; font: 13px/1.2 system-ui, 'Segoe UI', sans-serif; box-shadow: 0 12px 32px rgba(0, 0, 0, .3); animation: pd9-wn-in .18s ease-out; }
+    #pd9-feedbar .pd9-fb-count { font-weight: 600; margin-right: 4px; white-space: nowrap; }
+    #pd9-feedbar button { height: 30px; padding: 0 12px; border: 0; border-radius: 8px; background: #262b33; color: inherit; font: inherit; cursor: pointer; white-space: nowrap; }
+    #pd9-feedbar button:hover { background: #313741; }
+    #pd9-feedbar .pd9-fb-got { display: inline-flex; align-items: center; gap: 6px; background: #2fbfae; color: #06201d; font-weight: 600; }
+    #pd9-feedbar .pd9-fb-got:hover { background: #4fd3c3; }
+    #pd9-feedbar button:disabled { opacity: .6; cursor: progress; }
+    .pd9-folders-btn:disabled { opacity: .7; cursor: progress; }
+    .pd9-leftpane { position: fixed; z-index: 9001; top: var(--pd9-cp-top, 55px); left: 0; bottom: 0; width: var(--pd9-cp-list, 25vw); margin: 0; display: flex; flex-direction: column;
+      background: var(--t-color-background-primary, #fff); border-right: 1px solid var(--line, #dfe3e8);
+      visibility: hidden; opacity: 0; pointer-events: none; transform: translateX(-16px); transition: opacity 200ms ease, transform 260ms ${SIDE_EASE}, visibility 0s linear 260ms; }
+    .pd9-leftpane.pd9-tp-show { visibility: visible; opacity: 1; pointer-events: auto; transform: none; transition: opacity 200ms ease, transform 260ms ${SIDE_EASE}, visibility 0s; }
+    .pd9-leftpane .pd9-cp-body { position: relative; flex: 1; min-height: 0; }
+    .pd9-leftpane .pd9-cp-body iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; background: #fff; }
+    html.pd9-dark .pd9-leftpane, html.pd9-dark .pd9-leftpane iframe { background: #14171c; }
+    html.pd9-in-leftpane .app-header, html.pd9-in-leftpane .activity-filter-drawer { display: none !important; }
+    html.pd9-in-leftpane .crops-app-container { height: 100% !important; }
+    @media (prefers-reduced-motion: reduce) { .pd9-leftpane { transition: none !important; } }
     #pd9-stac-find { padding: 8px 12px; border-bottom: 1px solid var(--line, #dfe3e8); font-size: 13px; }
     #pd9-stac-find .pd9-sf-row { display: flex; align-items: center; gap: 6px; padding: 0 8px; border: 1px solid var(--t-color-border, #c9ced6); border-radius: 8px; background: var(--t-color-background-primary, #fff); color: #667085; }
     #pd9-stac-find .pd9-sf-row:focus-within { border-color: #2b7a78; box-shadow: 0 0 0 3px rgba(43, 122, 120, .15); }
@@ -8065,6 +8493,8 @@
     .pd9-wn-x:hover { background: #f2f4f7; color: #1d2433; }
     #pd9-whatsnew ul { margin: 8px 0 0; padding-left: 18px; }
     #pd9-whatsnew li { margin: 0 0 5px; }
+    #pd9-whatsnew li.pd9-wn-top { list-style: none; margin: 0 0 8px -18px; padding: 8px 10px; border-radius: 8px; background: #e7f5f3; border-left: 3px solid #2b7a78; }
+    html.pd9-dark #pd9-whatsnew li.pd9-wn-top { background: #16302e; }
     .pd9-wn-foot { display: flex; justify-content: flex-end; margin-top: 4px; }
     .pd9-wn-ok { height: 28px; padding: 0 12px; border-radius: 7px; border: 1px solid #1f7a77; background: #1f7a77; color: #fff; font: inherit; font-weight: 600; cursor: pointer; }
     .pd9-wn-ok:hover { background: #155e5b; }
