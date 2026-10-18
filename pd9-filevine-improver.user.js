@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PD9 Filevine Improver
 // @namespace    https://filevine.local/pd9-improver
-// @version      3.114.0
+// @version      3.128.2
 // @description  Faster notes, tasks, and case closing in Filevine for PD9.
 // @match        https://*.filevine.com/*
 // @match        https://*.filevineapp.com/*
@@ -714,7 +714,7 @@
   window.addEventListener('click', (e) => {
     if (!HUB_OPENS_TO || !onHub()) return;
     if (e.button !== 0 || e.ctrlKey || e.metaKey || e.shiftKey || e.altKey) return; // new tab etc. use the link
-    if (e.target.closest && e.target.closest('#pd9-hub-sorted, #pd9-case, #pd9-adv, #pd9-switch')) return; // the script's own lists handle their links
+    if (e.target.closest && e.target.closest('#pd9-hub-sorted, #pd9-case, #pd9-adv, #pd9-switch, #pd9-usdrop, #pd9-stac-find')) return; // the script's own lists handle their links
     const hit = hubCaseId(e.target);
     if (!hit) return;
     e.preventDefault();
@@ -872,6 +872,15 @@
     return wrap;
   }
 
+  // Everything "Back up settings" saves. Saved case lists, caches and one-time
+  // markers are left out on purpose.
+  const BACKUP_KEYS = [
+    'pd9-templates', 'pd9-dark', 'pd9-season', 'pd9-improved-search',
+    'pd9-hub-own-table', 'pd9-hub-own-layout', 'pd9-hub-own-sort', 'pd9-hub-own-tagfilter', 'pd9-hub-pins', 'pd9-switch-hub-filters',
+    'pd9-side-panel', 'pd9-side-list-width', 'pd9-docprev-width', 'pd9-composer-box', 'pd9-depo-mic',
+    'pd9-recent-cases', 'pd9-task-flags', 'pd9-task-triage-view',
+  ];
+
   // Warn if the floating box is set to a different case than the one on screen.
   function currentCaseName() {
     if (!inCase()) return '';
@@ -916,12 +925,12 @@
   // Newest first. "v" is the Improver version that brought it; "staff" is the Staff
   // version. Leave one out to hide the item from that script.
   const WHATS_NEW = [
-    { v: '3.114.0', items: [
-      { top: true, t: 'Stac view: works like the old STAC layout. Click a case in the PD9 table and it opens on the right, while your case list stays on the left. At the top of the list, one search box filters your cases as you type. Press Enter to also search all of Filevine by name or case number. Esc or \u00D7 closes the case. Turn it off with the "Stac mode" box next to "Window mode".' },
-      'In Stac view, Switch case opens the case on the right too. Tasks and Feed at the top show on the left, in place of your cases. Click a case name in an item to open it on the right. Esc, \u00D7, or the same button again brings your cases back. Documents opens in a new tab, and Project Hub closes the case.',
+    // One list for everything new for Monday (October 19, 2026).
+    { v: '3.128.1', items: [
+      { top: true, t: 'Stac view: works like the old STAC layout. Click a case in the PD9 table and it opens on the right, while your case list stays on the left. The search box at the top of the list filters your cases as you type (Enter searches all of Filevine). Up and Down step through cases. It works from the Tasks and Feed pages too: click a case there and it opens on the right with Tasks or Feed still on the left. Esc or \u00D7 closes the case. Turn it off with the "Stac mode" box above the table.' },
+      '33-day check: a button above the PD9 table shows in-jail cases that are not filed and not VOP, at day 30 or later since arrest, most days first. A "33 Day" column shows the day count. Arrest dates load by themselves in the background.',
+      'PD9 table tools: a filter box above the table searches it as you type (name, case number, tag, or event). A refresh button loads the project list again right away. "Osceola only" shows only case numbers that end in OS.',
       'Seasonal theme: pick "Seasonal" under Theme in Improver Options. Fall runs through Thanksgiving, then a Winter holiday look takes over until January 6.',
-      'Feed: Ctrl+click cards to select them (Shift+click selects a run), then press "Got it on all" in the bar at the bottom. A plain click still opens a card.',
-      'Filing Cabinet: in list view, "Expand all" next to the list/grid switch opens every folder, including folders inside folders. Click it again to close them all.',
     ] },
     // One list for everything new (October 13 and 14, 2026), so everyone sees it all together.
     { v: '3.105.1', items: [
@@ -1122,10 +1131,11 @@
           <button type="button" class="pd9-btn pd9-reset">Reset to defaults</button>
           <button type="button" class="pd9-btn pd9-export" title="Save your templates to a file">Export</button>
           <button type="button" class="pd9-btn pd9-import" title="Add templates from a file">Import</button>
+          <button type="button" class="pd9-btn pd9-backup" title="Save all your Improver settings to one file: templates, theme, table layout, pins, tag filters and more">Back up settings</button>
+          <button type="button" class="pd9-btn pd9-restore" title="Put back settings from a backup file (for a new computer or a reset browser)">Restore settings</button>
+          <input type="file" class="pd9-restore-file" accept=".json,application/json" hidden>
           <input type="file" class="pd9-file" accept=".json,application/json" hidden>
           <span class="pd9-grow"></span>
-          <label class="pd9-zoomopt" title="How big things look inside case windows. Auto shrinks them to fit when Windows display scaling is above 100%.">Case window zoom
-            <select class="pd9-zoomsel">${WIN_ZOOM_CHOICES.map(([v, t]) => `<option value="${v}">${t}</option>`).join('')}</select></label>
           <label class="pd9-zoomopt" title="A seasonal color theme for Filevine. Dark mode wins when it is on.">Theme
             <select class="pd9-seasonsel">${SEASONS.map(([v, t]) => `<option value="${v}">${t}</option>`).join('')}</select></label>
           <button type="button" class="pd9-btn pd9-cancel">Cancel</button>
@@ -1136,18 +1146,9 @@
 
     const q = (s) => overlay.querySelector(s);
     q('.pd9-whatsnew-btn').addEventListener('click', () => showWhatsNew(whatsNewItems(''), true));
-    const zoomSel = q('.pd9-zoomsel');
-    zoomSel.value = String(store.get(WIN_ZOOM_KEY, 'auto'));
-    if (!zoomSel.value) zoomSel.value = 'auto';
-    // Takes effect right away (it's not part of the templates' Save).
-    zoomSel.addEventListener('change', () => {
-      store.set(WIN_ZOOM_KEY, zoomSel.value);
-      applyWinZoom();
-      toast(zoomSel.value === 'auto' ? `Case windows: Auto (${Math.round(winZoom() * 100)}% on this screen)` : `Case windows: ${zoomSel.selectedOptions[0].textContent}`);
-    });
     const seasonSel = q('.pd9-seasonsel');
     seasonSel.value = seasonNow();
-    // Takes effect right away, like the zoom.
+    // Takes effect right away (it's not part of the templates' Save).
     seasonSel.addEventListener('change', () => {
       store.set(SEASON_KEY, seasonSel.value);
       applySeason();
@@ -1245,6 +1246,45 @@
       toast(`Exported ${list.length} template${list.length === 1 ? '' : 's'}.`);
     });
 
+    // Back up / restore every setting (not the saved case lists: those are
+    // locked to this browser and rebuild themselves).
+    q('.pd9-backup').addEventListener('click', () => {
+      const settings = {};
+      for (const k of BACKUP_KEYS) { const v = store.get(k, undefined); if (v !== undefined && v !== null) settings[k] = v; }
+      if (!settings['pd9-templates']) settings['pd9-templates'] = TEMPLATES; // the defaults, if never changed
+      const data = { app: 'pd9-filevine-improver', kind: 'settings', version: scriptVersion(), exported: new Date().toISOString(), settings };
+      const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      const d = new Date();
+      a.download = `pd9-improver-settings-${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}.json`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+      toast(`Backed up ${Object.keys(settings).length} settings.`);
+    });
+    const restoreInput = q('.pd9-restore-file');
+    q('.pd9-restore').addEventListener('click', () => { restoreInput.value = ''; restoreInput.click(); });
+    restoreInput.addEventListener('change', async () => {
+      const file = restoreInput.files && restoreInput.files[0];
+      if (!file) return;
+      try {
+        if (file.size > 5e6) throw new Error('too big');
+        const parsed = JSON.parse(await file.text());
+        if (!parsed || parsed.kind !== 'settings' || typeof parsed.settings !== 'object') throw new Error('not a backup');
+        const keys = Object.keys(parsed.settings).filter((k) => BACKUP_KEYS.includes(k));
+        if (!keys.length) throw new Error('empty');
+        const when = parsed.exported ? new Date(parsed.exported).toLocaleString() : 'an earlier date';
+        if (!confirm(`Restore ${keys.length} settings from ${when}? This replaces your current templates, theme, table layout and pins. The page reloads after.`)) return;
+        for (const k of keys) store.set(k, parsed.settings[k]);
+        toast('Settings restored. Reloading...');
+        setTimeout(() => location.reload(), 600);
+      } catch (err) {
+        toast('That file is not a PD9 Improver settings backup.');
+      }
+    });
+
     // Import: add templates from a file to this list. Nothing is replaced, and
     // nothing is kept until you click Save. Exact duplicates are skipped.
     const fileInput = q('.pd9-file');
@@ -1329,7 +1369,7 @@
   const sentenceForm = () => [...document.querySelectorAll('form.project-item-edit-form')]
     .find((f) => f.querySelector('[name^="sentencetype"]') && f.querySelector('[name^="dispositionaction"]')) || null;
   const fieldIn = (form, prefix) => [...form.querySelectorAll(`[name^="${prefix}"]`)]
-    .find((el) => /^\D+\d+$/.test(el.name) && el.name.replace(/\d+$/, '') === prefix) || null;
+    .find((el) => { const n = el.getAttribute('name') || ''; return n.replace(/\d+$/, '') === prefix && /\d$/.test(n); }) || null;
 
   function addCloseButton() {
     if (!onSentenceTab()) return;
@@ -1382,6 +1422,124 @@
     const first = fieldIn(form, 'dispositionaction');
     if (first) { first.scrollIntoView({ block: 'center', behavior: 'smooth' }); first.focus(); }
     toast('Fill in the rest, then click Create.');
+  }
+
+  // ---------- Sentence form: grouped layout ----------
+  // Filevine's Sentence form lists its fields in no clear order. This puts them
+  // in the order you close a case, under three headings. Nothing is moved in
+  // the page: the fields only get a new spot on screen (CSS grid), so Filevine
+  // keeps working the same. Fields we don't know about go at the end.
+  //   Outcome:  Disposition Action, Disposition Type, Disposition Date, Adjudicated
+  //   Sentence: Sentence Type, Amount, Amount Type, Sentence date, Disposition Notes
+  //   Guidelines and enhancements (folded until opened or filled in)
+  // [name start, order, columns out of 6, section]
+  const SENT_LAYOUT = [
+    ['dispositionaction', 10, 3, 'out'],
+    ['dispositiontype', 11, 3, 'out'],
+    ['dispositiondate', 12, 3, 'out'],
+    ['adjudicated', 13, 3, 'out'],
+    ['dispositionchargereason', 14, 6, 'out'],
+    ['sentencetype', 20, 2, 'sen'],
+    ['othersentencetype', 21, 2, 'sen'],
+    ['amount', 22, 1, 'sen'],
+    ['amounttype', 23, 1, 'sen'],
+    ['sentencedate', 24, 2, 'sen'],
+    ['dispositionnotes', 26, 6, 'sen'],
+    ['notes', 27, 6, 'sen'],
+    ['sentenceguideline', 31, 2, 'more'],
+    ['guidelinerange', 32, 2, 'more'],
+    ['lowestdocsentencemonths', 33, 2, 'more'],
+    ['f2_downwarddeparture', 34, 2, 'more'],
+    ['downwarddeparture', 35, 2, 'more'],
+    ['enhancement', 36, 2, 'more'],
+    ['sexenhancementdesignation', 37, 2, 'more'],
+  ];
+  const SENT_HEADS = [['out', 9, 'Outcome'], ['sen', 19, 'Sentence'], ['more', 30, 'Guidelines and enhancements']];
+  const SENT_MORE_KEY = 'pd9-sent-more-open';
+
+  // Court type from the case number: 'CF', 'MM', 'CT', ... or ''. Reads the
+  // Court Case Number (Case Summary) first, then the case name.
+  function caseCourtCode() {
+    const pid = projectId();
+    const hit = pid && courtNoCache.get(pid);
+    if (pid && !hit) courtCaseNumber(pid); // look it up for next time
+    const known = hit && !(hit instanceof Promise) ? hit.value : '';
+    let t = String(known || '').replace(/[^0-9A-Za-z]/g, '').toUpperCase();
+    if (/^\d{6}[A-Z]{2}/.test(t)) t = t.slice(2); // full UCN: county code first
+    const m = t.match(/^(?:\d{4}|\d{2})([A-Z]{2})\d/);
+    if (m) return m[1];
+    for (const c of String(currentCaseName() || '').matchAll(CASE_PART_RX)) return c[2].toUpperCase();
+    return '';
+  }
+  const isFelonyCode = (c) => c === 'CF';
+  const isCountyCode = (c) => c === 'MM' || c === 'CT';
+  // Disposition Type to start a new Sentence entry with.
+  const DISPO_TYPE_FOR = { felony: 'FELONY (2ND/3RD DEGREE)', county: 'OTHER MISDEMEANOR & CRIMINAL TRAFFIC' };
+  const dispoDefaulted = new WeakSet();
+
+  function layoutSentenceForm() {
+    if (!onSentenceTab()) return;
+    const form = sentenceForm();
+    const anchor = form && fieldIn(form, 'dispositionaction');
+    const row = anchor && anchor.closest('.form-group.row');
+    const grid = row && row.parentElement;
+    if (!grid || grid === form) return;
+    grid.classList.add('pd9-sf');
+    let more = false; // anything filled in the folded part?
+    for (const [prefix, order, cols, sec] of SENT_LAYOUT) {
+      const el = fieldIn(form, prefix);
+      const cell = el && el.closest('.custom-field');
+      if (!cell) continue;
+      cell.style.order = order;
+      cell.style.gridColumn = `span ${cols}`;
+      cell.dataset.pd9Sec = sec;
+      const v = String(el.value || '').trim();
+      if (sec === 'more' && v && !/^\?/.test(v) && !/^(none|\* not defined)$/i.test(el.options ? el.options[el.selectedIndex]?.textContent.trim() || '' : v)) more = true;
+    }
+    // Rows that hold fields melt away; other rows (buttons, messages) keep their
+    // place at the top or bottom.
+    let seenField = false;
+    for (const row of grid.children) {
+      if (row.classList.contains('pd9-sf-head')) continue;
+      if (row.querySelector('.custom-field')) { row.classList.add('pd9-sf-row'); seenField = true; continue; }
+      row.style.order = seenField ? 1000 : -10;
+      row.style.gridColumn = '1 / -1';
+    }
+    for (const [sec, order, text] of SENT_HEADS) {
+      if (grid.querySelector(`.pd9-sf-head[data-sec="${sec}"]`)) continue;
+      if (!grid.querySelector(`[data-pd9-sec="${sec}"]`)) continue;
+      const h = document.createElement('div');
+      h.className = 'pd9-sf-head';
+      h.dataset.sec = sec;
+      h.style.order = order;
+      if (sec === 'more') {
+        h.innerHTML = `<button type="button" aria-expanded="false"><i class="fa fa-caret-right"></i> ${text}</button>`;
+        h.querySelector('button').addEventListener('click', () => {
+          const open = !grid.classList.contains('pd9-sf-open');
+          store.set(SENT_MORE_KEY, open);
+          grid.classList.toggle('pd9-sf-open', open);
+          grid.dataset.pd9Touched = '1';
+          h.querySelector('button').setAttribute('aria-expanded', String(open));
+        });
+      } else h.textContent = text;
+      grid.appendChild(h);
+    }
+    // New entry: start Disposition Type from the case number (only if empty).
+    const code = caseCourtCode();
+    const dt = fieldIn(form, 'dispositiontype');
+    const isNew = [...form.querySelectorAll('#collection-top-save, #collection-bottom-save')].some((b) => /create/i.test(b.textContent));
+    if (dt && isNew && code && !dispoDefaulted.has(dt)) {
+      const want = isFelonyCode(code) ? DISPO_TYPE_FOR.felony : isCountyCode(code) ? DISPO_TYPE_FOR.county : '';
+      dispoDefaulted.add(dt);
+      if (want && !String(dt.value || '').trim()) selectByText(dt, want);
+    }
+    if (!grid.dataset.pd9Touched) {
+      // CF cases: open. MM and CT cases: folded (unless something is filled in).
+      // Anything else: however you left it last time.
+      const open = more || (isFelonyCode(code) ? true : isCountyCode(code) ? false : !!store.get(SENT_MORE_KEY, false));
+      grid.classList.toggle('pd9-sf-open', open);
+      grid.querySelector('.pd9-sf-head[data-sec="more"] button')?.setAttribute('aria-expanded', String(open));
+    }
   }
 
   // Hints under the labels of the Sentence form (shown any time the form is open).
@@ -1445,6 +1603,38 @@
       [...document.querySelectorAll('#collection-top-save, #collection-bottom-save, button')].find(isSave) || null;
   }
 
+  // ---------- Case Summary: FPDA Required Field up with User Status ----------
+  // Shows FPDA Required Field at the end of the User Status / Division /
+  // County / Court Type row. Only the order on screen changes: the rows are
+  // flattened (CSS) and each field gets a place in line. The page itself is
+  // not moved, so Filevine keeps working the same.
+  function moveFpdaUp() {
+    const fp = document.querySelector('select[name^="fpdarequiredfield"]');
+    const us = document.querySelector('select[name^="usersatus"]');
+    const fpCell = fp && fp.closest('.custom-field');
+    const usRow = us && us.closest('.form-group.row');
+    const grid = usRow && usRow.parentElement;
+    if (!fpCell || !grid || !grid.contains(fpCell) || usRow.contains(fpCell)) return;
+    if (grid.classList.contains('pd9-csum') && fpCell.classList.contains('pd9-csum-fp')) return;
+    grid.classList.add('pd9-csum');
+    grid.querySelectorAll(':scope > .pd9-csum-br').forEach((br) => br.remove());
+    const rows = [...grid.children];
+    rows.forEach((row, i) => {
+      const cells = [...row.children].filter((c) => c.classList.contains('custom-field'));
+      if (!row.classList.contains('row') || !cells.length) { row.style.order = String(i * 10); row.classList.add('pd9-csum-keep'); return; }
+      row.classList.add('pd9-csum-flat');
+      [...row.children].forEach((c) => { c.style.order = String(i * 10); });
+      const br = document.createElement('div');
+      br.className = 'pd9-csum-br';
+      br.style.order = String(i * 10 + 5);
+      grid.appendChild(br);
+    });
+    const usIdx = rows.indexOf(usRow);
+    [...usRow.children].forEach((c) => c.classList.add('pd9-csum-eq'));
+    fpCell.style.order = String(usIdx * 10 + 1);
+    fpCell.classList.add('pd9-csum-fp', 'pd9-csum-eq');
+  }
+
   function flash(el, on) { if (el) el.classList.toggle('pd9-flash', on); }
 
   // After the Sentence entry saves: go to Case Summary, set User Status and the
@@ -1457,6 +1647,15 @@
     const us = await waitFor(() => { const f = findUserStatus(); return f && f.select ? f : null; }, 8000);
     if (projectId() !== pid) return; // moved to another case, stop
     const usSet = us ? selectByText(us.select, 'Closed') : false;
+
+    // Court Type from the case number: CF = Circuit, MM or CT = County.
+    const code = caseCourtCode();
+    const ctWant = isFelonyCode(code) ? 'Circuit' : isCountyCode(code) ? 'County' : '';
+    const ctLabel = [...document.querySelectorAll('label')].find((l) => /^court type$/i.test(l.textContent.trim()) && isVisible(l));
+    const ctField = ctLabel && (ctLabel.closest('.custom-field') || ctLabel.parentElement.parentElement);
+    const ct = ctField && ctField.querySelector('select') ? { field: ctField, select: ctField.querySelector('select') } : null;
+    const ctSet = !!(ct && ctWant && selectByText(ct.select, ctWant));
+    flash(ct && ct.field, ctSet);
 
     const ps = phaseSelect();
     const wasPhase = phaseText();
@@ -1476,6 +1675,7 @@
       <h3>Double-check before saving</h3>
       <ul>
         ${row(usSet, usSet ? 'User Status set to <b>Closed</b> (outlined in orange)' : 'Could not set User Status. Pick <b>Closed</b> yourself.')}
+        ${row(ctSet, ctSet ? `Court Type set to <b>${ctWant}</b> (${escapeAttr(code)} case)` : !ctWant ? 'Could not tell Circuit or County from the case number. Check Court Type yourself.' : 'Could not find Court Type on this page. Set it yourself.')}
         ${row(canPhase, canPhase ? `Phase will change from <b>${escapeAttr(wasPhase || 'Open')}</b> to <b>Closed</b>` : 'Could not find the phase picker. Change it at the top of the case.')}
       </ul>
       <div class="pd9-panel-btns">
@@ -1484,23 +1684,24 @@
       </div>`;
     document.body.appendChild(panel);
     const q = (sel) => panel.querySelector(sel);
-    const done = () => { panel.remove(); flash(us && us.field, false); flash(phaseBox, false); };
+    const done = () => { panel.remove(); flash(us && us.field, false); flash(ct && ct.field, false); flash(phaseBox, false); };
     q('.pd9-cancel').addEventListener('click', () => { done(); toast('Nothing saved. User Status was changed but not saved.'); });
     q('.pd9-go').addEventListener('click', async () => {
       q('.pd9-go').disabled = true;
       q('.pd9-go').textContent = 'Saving...';
 
-      // 1) Save Case Summary.
+      // 1) Save Case Summary (and Court Type's section, if it has its own Save).
       let saved = true;
-      if (us) {
-        const save = await waitFor(() => { const b = findSectionSave(us.select); return b && !b.disabled ? b : null; }, 3000);
-        if (save) {
-          save.click();
-          // Saved = the button settles back to disabled, or the section redraws.
-          saved = !!(await waitFor(() => !document.contains(save) || save.disabled, 8000));
-        } else {
-          saved = false;
-        }
+      const changed = [us && us.select, ctSet && ct.select].filter(Boolean);
+      const clicked = new Set();
+      for (const el of changed) {
+        const save = await waitFor(() => { const b = findSectionSave(el); return b && (!b.disabled || clicked.has(b)) ? b : null; }, 3000);
+        if (!save) { saved = false; continue; }
+        if (clicked.has(save)) continue;
+        clicked.add(save);
+        save.click();
+        // Saved = the button settles back to disabled, or the section redraws.
+        if (!(await waitFor(() => !document.contains(save) || save.disabled, 8000))) saved = false;
       }
 
       // 2) Change the phase (Filevine saves this one on its own).
@@ -1527,6 +1728,14 @@
 
   const twoDigitYear = (y) => (y.length === 4 ? y.slice(2) : y);
   const stripZeros = (n) => n.replace(/^0+(?=\d)/, '');
+
+  // One standard look for case numbers: 24-CF-000632-A-OS (2-digit year, type,
+  // 6-digit number, defendant letter, county). Anything it can't read stays as is.
+  function formatCaseNo(raw) {
+    const c = readCaseNumbers(raw)[0];
+    if (!c) return String(raw || '');
+    return [c.year, c.type, c.num.padStart(6, '0'), c.def, c.county].filter(Boolean).join('-');
+  }
 
   // Every case number found in a piece of text, normalized.
   function readCaseNumbers(text) {
@@ -1766,25 +1975,144 @@
 
   const MAGNIFIER = '<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><circle cx="10" cy="10" r="6" fill="none" stroke="currentColor" stroke-width="2"/><path d="M15 15l5 5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>';
 
-  function addCaseSearchButton() {
-    const input = searchInput();
-    if (!input || document.getElementById('pd9-case-btn')) return;
-    const host = input.closest('.search') || input.closest('.fvs-autocomplete') || input.parentElement;
-    const make = (id, text, title, mode) => {
-      const btn = document.createElement('button');
-      btn.id = id;
-      btn.type = 'button';
-      btn.className = 'pd9-head-btn';
-      btn.title = title;
-      btn.innerHTML = `${MAGNIFIER}<span>${text}</span>`;
-      btn.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); toggleSearchPanel(btn, mode); });
-      return btn;
-    };
-    const caseBtn = make('pd9-case-btn', 'Case # Search', 'Search by case number, like STAC (241234, 24cf1234, 24-CF-001234-A-OS)', 'case');
-    const nameBtn = make('pd9-name-btn', 'Name Search', 'Search case names (any order, partial names work)', 'name');
-    host.after(caseBtn);
-    caseBtn.after(nameBtn);
+  // ---------- Improved search: the search box in the top bar ----------
+  // Replaces Filevine's "Search for a project" box with one box that does both
+  // Case # Search and Name Search. As you type, your own cases show right away;
+  // press Enter (or wait, if none of yours match) to search all of Filevine,
+  // archived cases too. Case numbers work STAC style (241234, 24cf1234,
+  // 24-CF-001234-A-OS); names work in any order. The button at its right end
+  // switches to Filevine's own search box and back (remembered).
+  const USEARCH_KEY = 'pd9-improved-search';
+  const usearchOn = () => store.get(USEARCH_KEY, true) !== false;
+  const usearch = { wrap: null, input: null, drop: null, auto: 0, timer: 0 };
+  const USEARCH_ICON = '<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="M7 7h11l-3-3M17 17H6l3 3" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+  function usearchHide() { if (usearch.drop) usearch.drop.hidden = true; clearTimeout(usearch.auto); }
+  function usearchPlace() {
+    if (!usearch.drop || !usearch.wrap) return;
+    const r = usearch.wrap.getBoundingClientRect();
+    usearch.drop.style.top = `${Math.round(r.bottom + 6)}px`;
+    usearch.drop.style.left = `${Math.round(Math.max(8, Math.min(r.left, window.innerWidth - 468)))}px`;
+    usearch.drop.style.width = `${Math.round(Math.max(r.width, 420))}px`;
   }
+  function usearchRun(q, all) {
+    const drop = usearch.drop;
+    const out = $('.pd9-case-results', drop);
+    const mode = readCaseQuery(q).length ? 'case' : 'name';
+    const m = SEARCH_MODES[mode];
+    drop.hidden = false;
+    usearchPlace();
+    clearTimeout(usearch.auto);
+    if (searchRequest) searchRequest.abort();
+    if (all) {
+      const problem = m.check(q);
+      if (problem) { out.innerHTML = `<div class="pd9-case-status">${escapeHtml(problem)}</div>`; return; }
+      searchDirect(q, drop, m);
+      return;
+    }
+    const mine = myCaseHits(q, mode);
+    out.textContent = '';
+    const hint = document.createElement('div');
+    hint.className = 'pd9-case-status pd9-us-hint';
+    const ok = !m.check(q);
+    hint.textContent = mine.length
+      ? `Press Enter to search all of Filevine for this ${mode === 'case' ? 'case number' : 'name'}.`
+      : ok ? 'None of your cases match. Searching all of Filevine...' : m.check(q);
+    out.appendChild(hint);
+    if (mine.length) drawHitList(out, mine, drop, 'Your cases');
+    if (!mine.length && ok) usearch.auto = setTimeout(() => { if (usearch.input.value.trim() === q) usearchRun(q, true); }, 450);
+  }
+  function addImprovedSearch() {
+    const input = searchInput();
+    const host = input && input.closest('.search');
+    if (!input || !host) return;
+    const on = usearchOn();
+    host.classList.toggle('pd9-us-on', on);
+    if (usearch.wrap && usearch.wrap.isConnected) {
+      usearch.wrap.classList.toggle('pd9-us-off', !on);
+      return;
+    }
+    // Look exactly like Filevine's box: copy its field.
+    // Copy the whole search container (not just the field), so Filevine's own
+    // dark top-bar styles apply to our copy too.
+    const field = input.closest('.search-container') || input.closest('.fvs-text-field') || input.parentElement;
+    const wrap = document.createElement('div');
+    wrap.id = 'pd9-usearch';
+    const clone = field.cloneNode(true);
+    clone.querySelectorAll('iframe, [role="listbox"], ul, .fvs-autocomplete-list, .visible-list-wrapper').forEach((el) => el.remove());
+    clone.querySelectorAll('[id]').forEach((el) => el.removeAttribute('id'));
+    if (clone.id) clone.removeAttribute('id');
+    const box = clone.querySelector('input');
+    ['role', 'aria-autocomplete', 'aria-controls', 'aria-expanded'].forEach((a) => box.removeAttribute(a));
+    box.placeholder = 'Improved search: name or case #';
+    box.setAttribute('aria-label', 'Improved search: name or case number');
+    box.value = '';
+    const sw = document.createElement('button');
+    sw.type = 'button';
+    sw.className = 'pd9-us-switch';
+    sw.innerHTML = USEARCH_ICON;
+    const setSwitch = () => {
+      const now = usearchOn();
+      sw.title = now ? 'Switch to Filevine\'s search' : 'Switch to Improved search';
+      sw.setAttribute('aria-label', sw.title);
+    };
+    setSwitch();
+    sw.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      store.set(USEARCH_KEY, !usearchOn());
+      usearchHide();
+      addImprovedSearch();
+      setSwitch();
+      const target = usearchOn() ? box : searchInput();
+      if (target) target.focus();
+      toast(usearchOn() ? 'Improved search on' : 'Filevine\'s search on. Tap the switch button to come back.');
+    });
+    wrap.append(clone, sw);
+    host.prepend(wrap);
+    wrap.classList.toggle('pd9-us-off', !on);
+    // Results drop down under the box.
+    const drop = document.createElement('div');
+    drop.id = 'pd9-usdrop';
+    drop.hidden = true;
+    drop.dataset.keep = '1';
+    drop.setAttribute('role', 'dialog');
+    drop.setAttribute('aria-label', 'Improved search results');
+    drop.innerHTML = `<div class="pd9-case-results" aria-live="polite"></div>
+      <div class="pd9-us-foot"><span>Enter: search all of Filevine \u00b7 Esc: close</span><button type="button" class="pd9-us-adv">Advanced name search</button></div>
+      <button type="button" class="pd9-go" hidden></button>`;
+    document.body.appendChild(drop);
+    usearch.wrap = wrap; usearch.input = box; usearch.drop = drop;
+    $('.pd9-us-adv', drop).addEventListener('click', () => { const v = box.value.trim(); usearchHide(); openAdvanced(v); });
+    // Opening a result closes the list.
+    drop.addEventListener('click', (e) => { if (e.target.closest('.pd9-case-list a')) setTimeout(() => { usearchHide(); box.blur(); }, 0); });
+    box.addEventListener('input', () => {
+      clearTimeout(usearch.timer);
+      const q = box.value.trim();
+      if (!q) { usearchHide(); return; }
+      usearch.timer = setTimeout(() => usearchRun(q, false), 150);
+    });
+    box.addEventListener('focus', () => { if (box.value.trim() && drop.hidden) usearchRun(box.value.trim(), false); });
+    ['keydown', 'keyup', 'keypress'].forEach((t) => box.addEventListener(t, (e) => {
+      e.stopPropagation(); // keep N/T/C and Filevine's shortcuts out of the box
+      if (t !== 'keydown') return;
+      if (e.key === 'Enter') { e.preventDefault(); const q = box.value.trim(); if (q) usearchRun(q, true); }
+      if (e.key === 'Escape') { e.preventDefault(); if (!drop.hidden) usearchHide(); else { box.value = ''; box.blur(); } }
+      if (e.key === 'ArrowDown') { const first = $('.pd9-case-list a', drop); if (first) { e.preventDefault(); first.focus(); } }
+    }));
+    drop.addEventListener('keydown', (e) => {
+      const links = $$('.pd9-case-list a', drop);
+      const i = links.indexOf(document.activeElement);
+      if (e.key === 'ArrowDown' && i >= 0) { e.preventDefault(); (links[i + 1] || links[i]).focus(); }
+      if (e.key === 'ArrowUp' && i >= 0) { e.preventDefault(); (i ? links[i - 1] : box).focus(); }
+      if (e.key === 'Escape') { e.preventDefault(); usearchHide(); box.focus(); }
+    });
+    document.addEventListener('mousedown', (e) => {
+      if (!drop.hidden && !drop.contains(e.target) && !wrap.contains(e.target)) usearchHide();
+    }, true);
+    window.addEventListener('resize', usearchPlace);
+  }
+
+
 
 
   const SEARCH_MODES = {
@@ -1824,51 +2152,7 @@
     return nameWords(entry).every((w) => have.some((h) => h.startsWith(w)));
   }
 
-  function toggleSearchPanel(btn, mode) {
-    const open = document.getElementById('pd9-case');
-    if (open) {
-      const same = open.dataset.mode === mode;
-      open.remove();
-      if (same) return;
-    }
-    const m = SEARCH_MODES[mode];
-    const panel = document.createElement('div');
-    panel.id = 'pd9-case';
-    panel.dataset.mode = mode;
-    panel.setAttribute('role', 'dialog');
-    panel.setAttribute('aria-label', mode === 'case' ? 'Case # Search' : 'Name Search');
-    panel.innerHTML = `
-      <label>${m.label}<input name="q" autocomplete="off" spellcheck="false"></label>
-      <p class="pd9-case-help">${m.help}</p>
-      <div class="pd9-panel-btns">
-        ${mode === 'name' ? '<button type="button" class="pd9-btn pd9-adv-open">Advanced search</button><span class="pd9-grow"></span>' : ''}
-        <button type="button" class="pd9-btn pd9-primary pd9-go">Search</button>
-      </div>
-      <div class="pd9-case-results" aria-live="polite"></div>`;
-    document.body.appendChild(panel);
-    const advBtn = panel.querySelector('.pd9-adv-open');
-    if (advBtn) advBtn.addEventListener('click', () => { const v = panel.querySelector('input').value.trim(); panel.remove(); openAdvanced(v); });
-    const r = btn.getBoundingClientRect();
-    panel.style.top = `${Math.round(r.bottom + 8)}px`;
-    panel.style.left = `${Math.max(8, Math.round(Math.min(r.left, window.innerWidth - 420)))}px`;
-    const input = panel.querySelector('input');
-    input.focus();
-    const go = () => {
-      const entry = input.value.trim();
-      const problem = m.check(entry);
-      if (problem) { toast(problem); input.focus(); return; }
-      searchDirect(entry, panel, m);
-    };
-    panel.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter' && e.target === input) { e.preventDefault(); go(); }
-      if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); panel.remove(); btn.focus(); }
-    });
-    panel.querySelector('.pd9-go').addEventListener('click', go);
-    setTimeout(() => document.addEventListener('mousedown', function away(e) {
-      if (!panel.isConnected) return document.removeEventListener('mousedown', away, true);
-      if (!panel.contains(e.target) && !e.target.closest('.pd9-head-btn')) { panel.remove(); document.removeEventListener('mousedown', away, true); }
-    }, true), 0);
-  }
+
 
   // ---------- open a case the fast way (search results) ----------
   // Same speed-ups as the PD9 table: Window mode opens a case window (from a warm
@@ -1877,15 +2161,12 @@
   // Ctrl/Cmd/Shift/middle click still open a new tab the normal way.
   function wireCaseLink(a, id, title, onOpen) {
     a.href = `#/project/${encodeURIComponent(id)}/activity`;
-    a.addEventListener('mouseenter', () => { if (!IN_FRAME && windowMode() && onHub()) prefetchCase(id); });
-    a.addEventListener('mouseleave', () => clearTimeout(prefetchTimer));
     a.addEventListener('click', (e) => {
       if (e.button !== 0 || e.ctrlKey || e.metaKey || e.shiftKey || e.altKey) return;
       e.preventDefault();
       if (onOpen) onOpen();
       if (!IN_FRAME && stacActive()) { stacOpenCase(id, title); rememberRecent(id); return; }
-      if (!IN_FRAME && windowMode() && onHub()) openCaseWindow(String(id), title || `Case ${id}`);
-      else if (!IN_FRAME && onHub()) window.open(`${location.origin}${location.pathname}#/project/${encodeURIComponent(id)}/activity`, CASE_TAB);
+      if (!IN_FRAME && onHub()) window.open(`${location.origin}${location.pathname}#/project/${encodeURIComponent(id)}/activity`, CASE_TAB);
       else location.hash = `#/project/${encodeURIComponent(id)}/activity`;
       rememberRecent(id);
     });
@@ -1958,7 +2239,7 @@
 
     const started = Date.now();
     const mode = m === SEARCH_MODES.case ? 'case' : 'name';
-    const mine = panel.dataset.keep ? [] : myCaseHits(entry, mode);
+    const mine = panel.dataset.nomine ? [] : myCaseHits(entry, mode);
     out.innerHTML = '<div class="pd9-case-status"><span class="pd9-spin" aria-hidden="true"></span><span class="pd9-case-wait">Searching, including archived...</span></div>';
     if (mine.length) drawHitList(out, mine, panel, 'Your cases (instant)');
     const tick = setInterval(() => {
@@ -2086,8 +2367,8 @@
     return key ? obj[key] : undefined;
   }
 
-  async function loadCaseSummary(projectId, signal) {
-    const url = `/api/projects/${encodeURIComponent(projectId)}/custom/${CASE_SUMMARY_SECTION}?page=1`;
+  async function loadCaseSummary(projectId, signal, section = CASE_SUMMARY_SECTION) {
+    const url = `/api/projects/${encodeURIComponent(projectId)}/custom/${section}?page=1`;
     const tries = [
       { method: 'POST', headers: { Accept: 'application/json', 'Content-Type': 'application/json' }, body: '{}' },
       { method: 'GET', headers: { Accept: 'application/json' } },
@@ -2979,7 +3260,8 @@
     if (!MR) return null;
     // WebM (Opus) is what Chrome and Edge record best. depoFixLength() adds the
     // length to the file so players can show it and skip around.
-    const options = [['audio/webm;codecs=opus', 'webm'], ['audio/webm', 'webm']];
+    // Safari (iPad) records MP4 audio instead; that saves as .m4a.
+    const options = [['audio/webm;codecs=opus', 'webm'], ['audio/webm', 'webm'], ['audio/mp4;codecs=mp4a.40.2', 'm4a'], ['audio/mp4', 'm4a']];
     for (const [mime, ext] of options) { try { if (MR.isTypeSupported(mime)) return { mime, ext }; } catch (e) { /* next */ } }
     return { mime: '', ext: 'webm' };
   }
@@ -3607,7 +3889,7 @@
     loadUpcoming()
       .then((list) => { hubEvents = new Map(list.map((e) => [e.projectId, e])); hubEventsAt = Date.now(); })
       .catch(() => { hubEvents = hubEvents || new Map(); hubEventsAt = Date.now() - 4 * 60 * 1000; }) // try again in a minute
-      .finally(() => { hubEventsLoading = false; showHubEvents(); const ov = document.getElementById('pd9-hub-sorted'); if (ov) drawOwnTable(ov); });
+      .finally(() => { hubEventsLoading = false; showHubEvents(); const ov = document.getElementById('pd9-hub-sorted'); if (ov) drawOwnTable(ov); saveHubTableCache(); });
   }
 
   const shortDate = (d) => `${d.getMonth() + 1}/${d.getDate()}/${d.getFullYear()}`;
@@ -3812,6 +4094,7 @@
     { key: 'event', label: 'Event', width: 220, sort: (r) => { const e = nextOf(r); return e && e.title ? shortTitle(e.title).toLowerCase() : null; } },
     { key: 'tags', label: 'Tags', width: 260, sort: (r) => (r.tags.length ? r.tags.map((t) => t.name).join(' ').toLowerCase() : null) },
     { key: 'charges', label: 'Charges', width: 150, sort: (r) => { const n = knownCharges(r.id); return n ? n.length : null; } },
+    { key: 'd33', label: '33 Day', width: 120, sort: (r) => (d33Ready(r) ? d33Days(r) : null) },
   ];
 
   // ---------- Pinned cases (PD9 table) ----------
@@ -4049,21 +4332,17 @@
       case 'caseNo': {
         const a = document.createElement('a');
         a.href = `#/project/${encodeURIComponent(r.id)}/activity`;
-        a.textContent = r.caseNo || `Case ${r.id}`;
-        // Window mode: open in a case window. Otherwise: open in the case tab.
-        // All cases share one case tab, so after the first, switching cases there
+        a.textContent = r.caseNo ? formatCaseNo(r.caseNo) : `Case ${r.id}`;
+        if (r.caseNo && formatCaseNo(r.caseNo) !== r.caseNo) a.title = `Filevine shows it as ${r.caseNo}`;
+        // Stac mode off: open in the case tab. All cases share one case tab, so after the first, switching cases there
         // skips reloading all of Filevine. Ctrl+click still opens a fresh tab.
         a.target = CASE_TAB;
         // Middle click opens a new tab the browser's normal way (the link's address).
-        a.addEventListener('mouseenter', () => { if (windowMode()) prefetchCase(r.id); });
-        a.addEventListener('mouseleave', () => clearTimeout(prefetchTimer));
         a.addEventListener('click', (ev) => {
           if (ev.button !== 0) return;
           if (ev.ctrlKey || ev.metaKey || ev.shiftKey) { ev.preventDefault(); window.open(a.href, '_blank', 'noopener'); return; } // a fresh tab
-          if (sidePanel()) { ev.preventDefault(); sideOpen(r); return; }
-          if (!windowMode()) return; // the shared case tab, as the link says
-          ev.preventDefault();
-          openCaseWindow(r.id, `${r.caseNo || ''}  ${r.defendant || r.clientName || ''}`.trim());
+          if (sidePanel()) { ev.preventDefault(); sideOpen(r); }
+          // otherwise: the shared case tab, as the link says
         });
         td.appendChild(a);
         break;
@@ -4143,6 +4422,17 @@
           showCharges(d, list, r.id);
         });
         td.appendChild(btn);
+        break;
+      }
+      case 'd33': {
+        // Only cases that qualify: in jail, not filed, not VOP, day 30 or later.
+        if (!d33Ready(r)) break;
+        const d = d33Days(r);
+        const b = document.createElement('span');
+        b.className = 'pd9-d33 pd9-d33-red';
+        b.textContent = `Day ${d}`;
+        b.title = `In jail, not filed. Arrested ${mdY(r.arrest)}, ${d} days ago. 33-day motion ready.`;
+        td.appendChild(b);
         break;
       }
       default: break;
@@ -4337,12 +4627,89 @@
     const base = rest.reduce((n, c) => n + Number(c.dataset.base), 0);
     const room = wrap.clientWidth - pickW;
     const docked = !!table.closest('.pd9-hs-docked');
+    // Next to an open case: the case number column fits the longest case number
+    // (no "..."), and Defendant takes the rest of the room.
+    const caseCol = rest.find((c) => c.dataset.key === 'caseNo');
+    const defCol = rest.find((c) => c.dataset.key === 'defendant');
+    if (docked && caseCol && defCol && room > 0) {
+      let w = 0;
+      for (const td of table.querySelectorAll('td[data-key="caseNo"]')) {
+        const inner = [...td.children].reduce((n, el) => n + el.getBoundingClientRect().width, 0) || td.scrollWidth - 24;
+        w = Math.max(w, inner);
+      }
+      const head = table.querySelector('th[data-key="caseNo"] button');
+      if (head) w = Math.max(w, head.scrollWidth);
+      const cw = Math.min(Math.ceil(w) + 28, Math.max(120, room - 140)); // 12px padding each side + line
+      caseCol.style.width = `${cw}px`;
+      defCol.style.width = `${Math.max(120, room - cw)}px`;
+      table.style.width = `${pickW + cw + parseFloat(defCol.style.width)}px`;
+      return;
+    }
     const factor = room > base || (docked && room > 0) ? room / base : 1;
     rest.forEach((c) => { c.style.width = `${Math.floor(Number(c.dataset.base) * factor)}px`; });
     table.style.width = `${pickW + rest.reduce((n, c) => n + parseFloat(c.style.width), 0)}px`;
   }
   window.addEventListener('resize', () => { const t = document.querySelector('#pd9-hub-sorted .pd9-hs-wrap table'); if (t) fitHubColumns(t); });
 
+  // ---------- 33-day check (Rule 3.134) ----------
+  // Cases tagged in-jail and not tagged filed or VOP: the Arrest Date is read from
+  // Intake and Summary in the background (a few at a time) and saved with the
+  // table. The "33-day check" button above the table shows only those cases,
+  // most days in jail first. Day 30 and up = red (motion ready), 25 to 29 = amber.
+  const INTAKE_SECTION = 'intakeandsummary886';
+  const OS_ONLY_KEY = 'pd9-hub-os-only';
+  const D33_JAIL = /^#?(in-?jail|jail)$/i;
+  const D33_FILED = /^#?filed$/i;
+  // VOP / VOCC cases don't get a 33-day motion: #VOP, #VOPARR, #VOPSTAT, #FELVOCC, ...
+  const D33_VOP = /^#?(fel|misd|mm)?vo(p|cc)/i;
+  let d33On = false;
+  let d33Busy = false;
+  const d33Candidate = (r) => r.tags.some((t) => D33_JAIL.test(t.name)) && !r.tags.some((t) => D33_FILED.test(t.name) || D33_VOP.test(t.name));
+  // Days since arrest (calendar days), or null if we don't know the date.
+  const d33Days = (r) => {
+    if (!(r.arrest instanceof Date) || isNaN(r.arrest)) return null;
+    const a = new Date(r.arrest.getFullYear(), r.arrest.getMonth(), r.arrest.getDate());
+    const t = new Date(); t.setHours(0, 0, 0, 0);
+    return Math.round((t - a) / 864e5);
+  };
+  // In jail, not filed, not VOP, and day 30 or later.
+  const d33Ready = (r) => d33Candidate(r) && (d33Days(r) ?? -1) >= 30;
+  // "2026-09-10T00:00:00Z" or "09/10/2026" -> local Date (the date as written).
+  function d33Parse(v) {
+    const t = String(v || '').trim();
+    let m = t.match(/^(\d{4})-(\d{2})-(\d{2})/);
+    if (m) return new Date(+m[1], +m[2] - 1, +m[3]);
+    m = t.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/);
+    if (m) return new Date(+m[3], +m[1] - 1, +m[2]);
+    return null;
+  }
+  async function loadArrestDates(ov) {
+    if (d33Busy || !hubTable || !hubTable.rows) return;
+    const table = hubTable;
+    // Known dates are kept; a missing date is checked again after 12 hours.
+    const todo = table.rows.filter((r) => d33Candidate(r) && !(r.arrest instanceof Date) && !(r.arrestAt && Date.now() - r.arrestAt < 12 * 36e5));
+    if (!todo.length) return;
+    d33Busy = true;
+    if (ov.isConnected) drawOwnTable(ov);
+    let next = 0;
+    let redraw = null;
+    const worker = async () => {
+      while (next < todo.length && hubTable === table) {
+        const r = todo[next++];
+        try {
+          const obj = await loadCaseSummary(r.id, undefined, INTAKE_SECTION);
+          r.arrest = d33Parse(pickField(obj, 'arrestdate'));
+          r.arrestAt = Date.now();
+        } catch (e) { /* try again next time */ }
+        clearTimeout(redraw);
+        redraw = setTimeout(() => { if (ov.isConnected && d33On) drawOwnTable(ov); }, 200);
+      }
+    };
+    await Promise.all([worker(), worker(), worker()]);
+    d33Busy = false;
+    if (hubTable === table) saveHubTableCache();
+    if (ov.isConnected) drawOwnTable(ov);
+  }
   function drawOwnTable(ov) {
     if (!hubTable || !hubTable.rows) return;
     learnAvatarColors();
@@ -4356,8 +4723,11 @@
     // to show only cases whose number ends in that county code. Nothing happens without it.
     const county = (document.documentElement.getAttribute('data-pd9-county') || '').toUpperCase();
     const inCounty = (r) => !county || String(r.caseNo || '').toUpperCase().replace(/[^A-Z0-9]/g, '').endsWith(county);
+    const osOnly = !!store.get(OS_ONLY_KEY, false);
+    const inOsceola = (r) => !osOnly || String(r.caseNo || '').toUpperCase().replace(/[^A-Z0-9]/g, '').endsWith('OS');
     const pins = pinSet();
-    const rows = hubTable.rows.filter((r) => passesTagFilter(r) && inCounty(r) && (!docked || stacRowMatch(r))).sort((a, b) => {
+    const rows = hubTable.rows.filter((r) => passesTagFilter(r) && inCounty(r) && inOsceola(r) && (docked ? stacRowMatch(r) : hubRowMatch(r)) && (docked || !d33On || d33Ready(r))).sort((a, b) => {
+      if (d33On && !docked) { const x = d33Days(a), y = d33Days(b); if (x !== y) return x == null ? 1 : y == null ? -1 : y - x; } // most days first
       const pa = pins.has(String(a.id)), pb = pins.has(String(b.id));
       if (pa !== pb) return pa ? -1 : 1; // pinned cases always on top
       const x = col.sort(a), y = col.sort(b);
@@ -4516,13 +4886,13 @@
       if (side && side.open && side.id === String(r.id)) tr.classList.add('pd9-row-open');
       // Click anywhere on the row to open the case (buttons, links and boxes in it keep their own job).
       tr.addEventListener('mouseenter', () => sideWarm(r.id));
+      // Start switching the case the moment the mouse goes down (a click finishes a bit later).
+      tr.addEventListener('pointerdown', (e) => { if (e.button === 0 && sidePanel() && !stacOne() && side && side.ready && !side.open && !e.target.closest('a, button, input, label, select, textarea, .pd9-pick')) sideLoad(r.id); });
       tr.addEventListener('click', (e) => {
         if (e.button !== 0 || e.target.closest('a, button, input, label, select, textarea, [role="button"], .pd9-pick')) return;
         if (String(window.getSelection() || '').trim()) return; // selecting text, not opening
-        const title = `${r.caseNo || ''}  ${r.defendant || r.clientName || ''}`.trim();
         if (e.ctrlKey || e.metaKey || e.shiftKey) { window.open(`${location.origin}${location.pathname}${caseHash(r.id)}`, '_blank', 'noopener'); return; }
         if (sidePanel()) sideOpen(r);
-        else if (windowMode()) openCaseWindow(r.id, title);
         else window.open(`${location.origin}${location.pathname}${caseHash(r.id)}`, CASE_TAB);
       });
       const pick = document.createElement('td');
@@ -4554,7 +4924,12 @@
       pinBtn.addEventListener('click', (e) => { e.stopPropagation(); togglePin(r.id); drawOwnTable(ov); });
       pick.appendChild(pinBtn);
       tr.appendChild(pick);
-      for (const c of cols) { const td = document.createElement('td'); td.dataset.key = c.key; cellFor(c.key, r, td); tr.appendChild(td); }
+      for (const c of cols) {
+        const td = document.createElement('td');
+        td.dataset.key = c.key;
+        cellFor(c.key, r, td);
+        tr.appendChild(td);
+      }
       tbody.appendChild(tr);
     });
     table.append(colgroup, thead, tbody);
@@ -4566,7 +4941,58 @@
     const tf = tagFilter();
     const status = ov.querySelector('.pd9-hs-status');
     const nPins = rows.filter((r) => pins.has(String(r.id))).length;
-    status.textContent = (tf.tags.length || tf.not.length || county ? `${rows.length} of ${hubTable.rows.length} projects` : `${rows.length} projects`) + (nPins ? `, ${nPins} pinned` : '') + (soon ? `, ${soon} with an event in the next 3 days` : '');
+    status.textContent = (tf.tags.length || tf.not.length || county || osOnly || (!docked && hubQuery.trim()) ? `${rows.length} of ${hubTable.rows.length} projects` : `${rows.length} projects`) + (nPins ? `, ${nPins} pinned` : '') + (soon ? `, ${soon} with an event in the next 3 days` : '')
+      + (hubTable.fromCache ? ` \u00b7 saved ${agoText(hubTable.fromCache)}${hubTable.updateFailed ? ', could not update' : ', updating...'}` : '')
+      + (hubTable.refreshing ? ' \u00b7 refreshing...' : '');
+    // 33-day check button
+    let d33 = ov.querySelector('.pd9-d33-btn');
+    if (!d33) {
+      d33 = document.createElement('button');
+      d33.type = 'button';
+      d33.className = 'pd9-bulk-btn pd9-d33-btn';
+      d33.addEventListener('click', () => { d33On = !d33On; drawOwnTable(ov); loadArrestDates(ov); });
+      const holder = ov.querySelector('.pd9-hs-bar');
+      holder.insertBefore(d33, holder.querySelector('.pd9-bulk-bar'));
+      // Search the whole table as you type.
+      const find = document.createElement('label');
+      find.className = 'pd9-hs-find';
+      find.innerHTML = `${MAGNIFIER}<input type="search" autocomplete="off" spellcheck="false" placeholder="Filter: name, case #, tag, event" aria-label="Filter the PD9 table">`;
+      const fi = find.querySelector('input');
+      fi.value = hubQuery;
+      let ft = 0;
+      fi.addEventListener('input', () => { clearTimeout(ft); ft = setTimeout(() => { hubQuery = fi.value; drawOwnTable(ov); }, 120); });
+      fi.addEventListener('keydown', (e) => { if (e.key === 'Escape' && fi.value) { e.preventDefault(); e.stopPropagation(); fi.value = ''; hubQuery = ''; drawOwnTable(ov); } });
+      d33.before(find);
+      // Refresh: load the project list again now (the table stays up meanwhile).
+      const rf = document.createElement('button');
+      rf.type = 'button';
+      rf.className = 'pd9-bulk-btn pd9-hs-refresh';
+      rf.title = 'Refresh the PD9 table now';
+      rf.setAttribute('aria-label', 'Refresh the PD9 table');
+      rf.innerHTML = REFRESH_ICON;
+      rf.addEventListener('click', () => buildOwnTable(ov, true));
+      d33.after(rf);
+      // Osceola only: case numbers that end in OS.
+      const os = document.createElement('label');
+      os.className = 'pd9-hs-os';
+      os.title = 'Show only Osceola cases (case numbers ending in OS)';
+      os.innerHTML = '<input type="checkbox"> Osceola only';
+      const osBox = os.querySelector('input');
+      osBox.checked = !!store.get(OS_ONLY_KEY, false);
+      osBox.addEventListener('change', () => { store.set(OS_ONLY_KEY, osBox.checked); drawOwnTable(ov); });
+      rf.after(os);
+    }
+    const rfBtn = ov.querySelector('.pd9-hs-refresh');
+    if (rfBtn) { rfBtn.disabled = !!hubTable.refreshing; rfBtn.classList.toggle('pd9-rf-spin', !!hubTable.refreshing); }
+    const cand = hubTable.rows.filter(d33Candidate);
+    const ready = cand.filter(d33Ready).length;
+    d33.classList.toggle('pd9-d33-on', d33On);
+    d33.setAttribute('aria-pressed', String(d33On));
+    d33.textContent = `33-day check${ready ? ` (${ready})` : ''}${d33Busy ? '\u2026' : ''}`;
+    d33.title = d33On ? 'Show all cases again' : 'Show in-jail cases that are not filed and not VOP, at day 30 or later';
+    if (d33On && !docked) {
+      status.textContent = `33-day check: ${ready} case${ready === 1 ? '' : 's'} in jail, not filed, not VOP, at day 30 or later${d33Busy ? ' (still checking arrest dates)' : ''}.`;
+    }
     let act = ov.querySelector('.pd9-bulk-bar');
     if (!act) { act = document.createElement('span'); act.className = 'pd9-bulk-bar'; ov.querySelector('.pd9-hs-bar').appendChild(act); }
     act.textContent = '';
@@ -4617,20 +5043,133 @@
     if (bar) { bar.style.width = `${Math.round((named / Math.max(rows.length, 1)) * 100)}%`; bar.hidden = named >= rows.length; }
   }
 
-  async function buildOwnTable(ov) {
+  // ---------- Saved PD9 table (encrypted) ----------
+  // The last PD9 table is saved, encrypted, so the Project Hub shows it right
+  // away next time while the fresh list loads in the background. The data is
+  // locked with AES-GCM (256-bit). The key is made by the browser, kept in this
+  // site's own storage (IndexedDB) and can't be copied out; the locked data sits
+  // in the script's storage. Neither one alone can be read. The saved copy is
+  // only used for the same Filevine user and the same Project Hub filters, and
+  // it's thrown away after 14 days. Profile pictures aren't saved.
+  const HUB_CACHE_KEY = 'pd9-hub-cache';
+  const HUB_CACHE_DAYS = 14;
+  let hubCacheKeyP = null;
+  function hubCacheKey() {
+    if (hubCacheKeyP) return hubCacheKeyP;
+    hubCacheKeyP = new Promise((resolve, reject) => {
+      if (!window.indexedDB || !window.crypto || !crypto.subtle) { reject(new Error('no crypto')); return; }
+      const open = indexedDB.open('pd9-cache', 1);
+      open.onupgradeneeded = () => open.result.createObjectStore('keys');
+      open.onerror = () => reject(open.error);
+      open.onsuccess = () => {
+        const db = open.result;
+        const get = db.transaction('keys').objectStore('keys').get('hub');
+        get.onerror = () => reject(get.error);
+        get.onsuccess = async () => {
+          if (get.result) { resolve(get.result); return; }
+          try {
+            const key = await crypto.subtle.generateKey({ name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
+            const tx = db.transaction('keys', 'readwrite');
+            tx.objectStore('keys').put(key, 'hub');
+            tx.oncomplete = () => resolve(key);
+            tx.onerror = () => reject(tx.error);
+          } catch (e) { reject(e); }
+        };
+      };
+    }).catch((e) => { hubCacheKeyP = null; throw e; });
+    return hubCacheKeyP;
+  }
+  const toB64 = (buf) => { const b = new Uint8Array(buf); let out = ''; for (let i = 0; i < b.length; i += 0x8000) out += String.fromCharCode(...b.subarray(i, i + 0x8000)); return btoa(out); };
+  const fromB64 = (str) => Uint8Array.from(atob(str), (c) => c.charCodeAt(0));
+  // Lock and unlock any saved data with the same browser-made key.
+  async function sealJSON(obj) {
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, await hubCacheKey(), new TextEncoder().encode(JSON.stringify(obj)));
+    return { iv: toB64(iv), ct: toB64(ct) };
+  }
+  async function openJSON(rec, reviver) {
+    const plain = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: fromB64(rec.iv) }, await hubCacheKey(), fromB64(rec.ct));
+    return JSON.parse(new TextDecoder().decode(plain), reviver);
+  }
+  const hubCacheUser = () => { const el = $('.global-avatar-menu-trigger-content [aria-label]'); return el ? el.getAttribute('aria-label') : ''; };
+  let hubCacheTimer = 0;
+  function saveHubTableCache() {
+    clearTimeout(hubCacheTimer);
+    hubCacheTimer = setTimeout(async () => {
+      if (!hubTable || !hubTable.rows || hubTable.fromCache) return;
+      try {
+        const data = {
+          href: hubTable.href,
+          rows: hubTable.rows.map((r) => ({ ...r, picture: '' })),
+          events: hubEvents ? [...hubEvents.values()] : null,
+        };
+        const iv = crypto.getRandomValues(new Uint8Array(12));
+        const ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, await hubCacheKey(), new TextEncoder().encode(JSON.stringify(data)));
+        store.set(HUB_CACHE_KEY, { at: Date.now(), href: hubTable.href, who: hubCacheUser(), iv: toB64(iv), ct: toB64(ct) });
+      } catch (e) { /* saving is optional */ }
+    }, 1000);
+  }
+  async function loadHubTableCache(href) {
+    const c = store.get(HUB_CACHE_KEY, null);
+    if (!c || !c.ct || c.href !== href || Date.now() - c.at > HUB_CACHE_DAYS * 864e5) return null;
+    const who = hubCacheUser();
+    if (who && c.who && who !== c.who) return null; // someone else's list
+    const plain = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: fromB64(c.iv) }, await hubCacheKey(), fromB64(c.ct));
+    const iso = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$/;
+    const data = JSON.parse(new TextDecoder().decode(plain), (k, v) => (typeof v === 'string' && iso.test(v) ? new Date(v) : v));
+    return { ...data, at: c.at };
+  }
+  const agoText = (t) => { const m = Math.round((Date.now() - t) / 60000); return m < 1 ? 'just now' : m < 60 ? `${m} min ago` : m < 1440 ? `${Math.round(m / 60)} hr ago` : `${Math.round(m / 1440)} days ago`; };
+
+  async function buildOwnTable(ov, refresh = false) {
     const href = hubFilterKey();
+    if (refresh && hubTable && hubTable.href === href && hubTable.rows) {
+      // Refresh button: keep showing the table while the fresh list loads.
+      if (hubTable.refreshing) return;
+      hubTable.refreshing = true;
+      hubTable.updateFailed = '';
+      hubTable.rows.forEach((r) => { if (!(r.arrest instanceof Date)) r.arrestAt = 0; }); // check missing arrest dates again
+      hubEventsAt = 0; // and the events
+      drawOwnTable(ov);
+    } else {
     hubTable = { href, rows: null };
     ov.querySelector('.pd9-hs-status').textContent = 'Loading the case list...';
+    // Show the saved table right away (if there is one), then update it.
+    try {
+      const cached = await loadHubTableCache(href);
+      if (cached && hubTable && hubTable.href === href && !hubTable.rows && cached.rows && cached.rows.length) {
+        hubTable.rows = cached.rows;
+        hubTable.fromCache = cached.at;
+        // Names already known: no need to look them up again.
+        cached.rows.forEach((r) => { if (r.clientID && r.defendant && !nameCache.has(r.clientID)) nameCache.set(r.clientID, r.defendant); });
+        if (!hubEvents && cached.events) { hubEvents = new Map(cached.events.map((e) => [e.projectId, e])); hubEventsAt = 0; } // still refreshed below
+        if (ov.isConnected) drawOwnTable(ov);
+        sidePreload();
+      }
+    } catch (e) { /* no saved table, or it can't be read: just load */ }
+    }
     loadHubEvents();
     let rows;
     try { rows = await loadHubList(); } catch (err) {
-      if (hubTable && hubTable.href === href) ov.querySelector('.pd9-hs-status').textContent = `Could not load the case list (${err.message}). Use "Filevine's table".`;
+      if (hubTable && hubTable.href === href) {
+        if (hubTable.refreshing) { hubTable.refreshing = false; drawOwnTable(ov); toast(`Could not refresh the case list (${err.message}).`); return; }
+        if (hubTable.fromCache) hubTable.updateFailed = err.message;
+        ov.querySelector('.pd9-hs-status').textContent = hubTable.fromCache
+          ? `Showing the saved list from ${agoText(hubTable.fromCache)}. Could not update it (${err.message}).`
+          : `Could not load the case list (${err.message}). Use "Filevine's table".`;
+      }
       return;
     }
     if (!hubTable || hubTable.href !== href) return;
+    const before = new Map((hubTable.rows || []).map((r) => [r.id, r]));
+    rows.forEach((r) => { const o = before.get(r.id); if (o && o.arrestAt) { r.arrest = o.arrest; r.arrestAt = o.arrestAt; } });
     hubTable.rows = rows;
+    hubTable.fromCache = 0;
+    hubTable.refreshing = false;
     publishSwitchList(rows);
     drawOwnTable(ov);
+    sidePreload();
+    setTimeout(() => loadArrestDates(ov), 1500); // 33-day check, in the background
     // Real first and last names, a few at a time; redraw as they come in.
     let next = 0;
     let redraw = null;
@@ -4643,13 +5182,13 @@
       }
     };
     await Promise.all([worker(), worker(), worker(), worker(), worker(), worker()]);
-    if (hubTable && hubTable.href === href) publishSwitchList(rows); // now with Last, First names
+    if (hubTable && hubTable.href === href) { publishSwitchList(rows); saveHubTableCache(); } // now with Last, First names
     if (ov.isConnected) drawOwnTable(ov);
   }
 
   // The "Alternate table" checkbox above the table switches between ours and Filevine's.
   function showOwnTable(force) {
-    if (!onHub()) { hubTable = null; return; }
+    if (!onHub()) { if (!(side && side.one && (side.open || side.opening))) hubTable = null; return; }
     const grid = $('.ag-root-wrapper');
     if (!grid) return;
     const host = grid.parentElement;
@@ -4680,30 +5219,8 @@
     }
     const box = toggle.querySelector('input');
     if (box.checked !== useOwn) { box.checked = useOwn; box.setAttribute('aria-checked', String(useOwn)); }
-    if (!document.getElementById('pd9-win-toggle')) {
-      const w = toggle.cloneNode(true);
-      w.id = 'pd9-win-toggle';
-      w.classList.remove('pd9-hub-toggle-plain');
-      if (toggle.classList.contains('pd9-hub-toggle-plain')) w.classList.add('pd9-hub-toggle-plain');
-      (w.querySelector('.form-field-label') || w.lastChild).textContent = w.querySelector('.form-field-label') ? 'Window mode' : ' Window mode';
-      w.title = 'Open cases from the PD9 table in movable windows. When off, cases open in a new tab.';
-      const wb = w.querySelector('input');
-      wb.checked = windowMode();
-      wb.setAttribute('aria-checked', String(wb.checked));
-      wb.addEventListener('change', (e) => {
-        store.set(WIN_MODE_KEY, e.target.checked);
-        e.target.setAttribute('aria-checked', String(e.target.checked));
-        if (e.target.checked) makeSpare(); else document.querySelectorAll('.pd9-win-spare').forEach((x) => x.remove());
-        // Window mode and Stac mode are either/or.
-        if (e.target.checked) { store.set(SIDE_KEY, false); sideClose(); }
-        const sb = document.querySelector('#pd9-side-toggle input');
-        if (sb) { sb.checked = sidePanel(); sb.setAttribute('aria-checked', String(sb.checked)); }
-      });
-      toggle.after(w);
-    }
     if (!STAFF && !document.getElementById('pd9-side-toggle')) {
-      const winT = document.getElementById('pd9-win-toggle');
-      const sp = (winT || toggle).cloneNode(true);
+      const sp = toggle.cloneNode(true);
       sp.id = 'pd9-side-toggle';
       (sp.querySelector('.form-field-label') || sp.lastChild).textContent = sp.querySelector('.form-field-label') ? 'Stac mode' : ' Stac mode';
       sp.title = 'Stac mode: click a case to open it next to the table, so your case list stays in view.';
@@ -4713,14 +5230,9 @@
       sb.addEventListener('change', (e) => {
         store.set(SIDE_KEY, e.target.checked);
         e.target.setAttribute('aria-checked', String(e.target.checked));
-        if (e.target.checked) {
-          store.set(WIN_MODE_KEY, false);
-          document.querySelectorAll('.pd9-win-spare').forEach((x) => x.remove());
-          const wbx = document.querySelector('#pd9-win-toggle input');
-          if (wbx) { wbx.checked = false; wbx.setAttribute('aria-checked', 'false'); }
-        } else sideClose();
+        if (!e.target.checked) sideClose();
       });
-      (winT || toggle).after(sp);
+      toggle.after(sp);
     }
     if (!useOwn) { if (ov) ov.remove(); return; }
     if (!ov) {
@@ -4730,9 +5242,16 @@
       if (getComputedStyle(host).position === 'static') host.style.position = 'relative';
       host.appendChild(ov);
       matchFilevineLook(ov);
-      buildOwnTable(ov);
-    } else if (!hubTable || hubTable.href !== hubFilterKey()) {
-      buildOwnTable(ov); // filters changed
+      if (hubTable && hubTable.rows && hubTable.href === hubFilterKey()) drawOwnTable(ov); else buildOwnTable(ov);
+    } else {
+      // Back on the Project Hub after Stac view (one copy): put the table back in its spot.
+      if (ov.classList.contains('pd9-hs-parked') && !ov.classList.contains('pd9-hs-docked')) {
+        if (getComputedStyle(host).position === 'static') host.style.position = 'relative';
+        ov.classList.remove('pd9-hs-parked');
+        host.appendChild(ov);
+        drawOwnTable(ov);
+      }
+      if (!hubTable || hubTable.href !== hubFilterKey()) buildOwnTable(ov); // filters changed
     }
   }
 
@@ -4748,394 +5267,6 @@
 
 
   const CASE_TAB = 'pd9-case-tab';
-
-  // ---------- Window mode: cases in movable windows ----------
-  // Each window holds the case in a frame. Drag the title bar to move, drag the
-  // corner to resize, minimize to the bar at the bottom, open as many as you like.
-  // Windows stay open while you move around Filevine and come back after a reload.
-  const WIN_MODE_KEY = 'pd9-window-mode';
-  const WIN_LIST_KEY = 'pd9-case-windows';
-  const windowMode = () => store.get(WIN_MODE_KEY, false);
-  let winZ = 100010;
-
-  // Case windows belong to the Project Hub tab that made them. A new tab opened from
-  // that tab gets a copy of its session storage, so the list is marked with this
-  // tab's own name and a new tab (with a different name) never brings them back.
-  function hubTabId() {
-    if (!/^pd9-hub-/.test(window.name || '')) window.name = `pd9-hub-${Math.random().toString(36).slice(2)}`;
-    return window.name;
-  }
-  const winState = () => {
-    try {
-      const saved = JSON.parse(sessionStorage.getItem(WIN_LIST_KEY) || 'null');
-      if (!saved || Array.isArray(saved) || saved.tab !== window.name) return []; // not this tab's windows
-      return saved.list || [];
-    } catch (e) { return []; }
-  };
-  function saveWindows() {
-    const list = [...document.querySelectorAll('.pd9-win:not(.pd9-win-spare)')].map((w) => {
-      const r = w.getBoundingClientRect();
-      return { id: w.dataset.pid, title: w.dataset.title, href: w.dataset.href || '', auto: w.dataset.auto || '', min: w.classList.contains('pd9-win-min'), max: w.classList.contains('pd9-win-max'),
-        box: w.dataset.box ? JSON.parse(w.dataset.box) : { left: r.left, top: r.top, width: r.width, height: r.height }, z: +w.style.zIndex || 0 };
-    });
-    try { sessionStorage.setItem(WIN_LIST_KEY, JSON.stringify({ tab: hubTabId(), list })); } catch (e) { /* ignore */ }
-  }
-
-  // Where the bar sits along the bottom: its center, as a share of the screen width.
-  const TASKBAR_KEY = 'pd9-taskbar-x';
-  function placeTaskbar(bar, x) {
-    const half = (bar.offsetWidth / 2) / window.innerWidth;
-    const min = Math.min(0.5, half + 8 / window.innerWidth), max = Math.max(0.5, 1 - half - 8 / window.innerWidth);
-    const v = Math.min(Math.max(Number.isFinite(x) ? x : 0.5, min), max);
-    bar.dataset.x = String(v);
-    bar.style.left = `${(v * 100).toFixed(2)}%`;
-  }
-  function taskbar() {
-    let bar = document.getElementById('pd9-taskbar');
-    if (!bar) {
-      bar = document.createElement('div');
-      bar.id = 'pd9-taskbar';
-      bar.setAttribute('role', 'toolbar');
-      bar.setAttribute('aria-label', 'Open case windows');
-      document.body.appendChild(bar);
-      window.addEventListener('resize', () => placeTaskbar(bar, store.get(TASKBAR_KEY, 0.5)));
-    }
-    return bar;
-  }
-  function drawTaskbar() {
-    const bar = taskbar();
-    const wins = [...document.querySelectorAll('.pd9-win:not(.pd9-win-spare)')];
-    bar.hidden = !wins.length;
-    bar.textContent = '';
-    requestAnimationFrame(() => placeTaskbar(bar, store.get(TASKBAR_KEY, 0.5)));
-    const top = wins.filter((w) => !w.classList.contains('pd9-win-min')).sort((a, b) => b.style.zIndex - a.style.zIndex)[0];
-    // Grip: drag to slide the bar left or right along the bottom. Double-click to center it.
-    const grip = document.createElement('span');
-    grip.className = 'pd9-task-grip';
-    grip.title = 'Drag to move the bar. Double-click to center it.';
-    grip.setAttribute('aria-hidden', 'true');
-    grip.addEventListener('pointerdown', (e) => {
-      if (e.button !== 0) return;
-      e.preventDefault();
-      const r = bar.getBoundingClientRect();
-      const dx = e.clientX - (r.left + r.width / 2);
-      grip.setPointerCapture(e.pointerId);
-      bar.classList.add('pd9-task-dragging');
-      const move = (ev) => placeTaskbar(bar, (ev.clientX - dx) / window.innerWidth);
-      const up = () => {
-        grip.removeEventListener('pointermove', move);
-        grip.removeEventListener('pointerup', up);
-        bar.classList.remove('pd9-task-dragging');
-        store.set(TASKBAR_KEY, +bar.dataset.x);
-      };
-      grip.addEventListener('pointermove', move);
-      grip.addEventListener('pointerup', up);
-    });
-    grip.addEventListener('dblclick', () => { placeTaskbar(bar, 0.5); store.set(TASKBAR_KEY, 0.5); });
-    bar.appendChild(grip);
-    // Home: minimize every window and show the page underneath.
-    const home = document.createElement('button');
-    home.type = 'button';
-    home.className = 'pd9-task-home';
-    home.title = 'Minimize all windows';
-    home.setAttribute('aria-label', 'Minimize all windows');
-    home.innerHTML = '<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="M4 11.5 12 5l8 6.5M6.5 10v9h11v-9" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
-    home.addEventListener('click', () => {
-      document.querySelectorAll('.pd9-win:not(.pd9-win-spare)').forEach((w) => { w.classList.add('pd9-win-min'); w.classList.remove('pd9-win-focus'); });
-      drawTaskbar();
-      saveWindows();
-    });
-    bar.appendChild(home);
-    const sep = document.createElement('span');
-    sep.className = 'pd9-task-sep';
-    sep.setAttribute('aria-hidden', 'true');
-    bar.appendChild(sep);
-    for (const w of wins) {
-      const item = document.createElement('span');
-      item.className = 'pd9-task' + (w === top ? ' pd9-task-active' : '') + (w.classList.contains('pd9-win-min') ? ' pd9-task-min' : '');
-      const b = document.createElement('button');
-      b.type = 'button';
-      b.className = 'pd9-task-name';
-      b.textContent = w.dataset.title;
-      b.title = w.dataset.title;
-      b.addEventListener('click', () => {
-        if (w.classList.contains('pd9-win-min')) { w.classList.remove('pd9-win-min'); focusWindow(w); }
-        else if (w === top) minimizeWindow(w);
-        else focusWindow(w);
-      });
-      const x = document.createElement('button');
-      x.type = 'button';
-      x.className = 'pd9-task-x';
-      x.title = 'Close this window';
-      x.setAttribute('aria-label', `Close ${w.dataset.title}`);
-      x.innerHTML = '<svg viewBox="0 0 24 24" width="12" height="12" aria-hidden="true"><path d="M7 7l10 10M17 7L7 17" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/></svg>';
-      x.addEventListener('click', (e) => { e.stopPropagation(); closeWindow(w); });
-      item.append(b, x);
-      bar.appendChild(item);
-    }
-  }
-
-  function focusWindow(w) {
-    w.style.zIndex = ++winZ;
-    document.querySelectorAll('.pd9-win:not(.pd9-win-spare)').forEach((x) => x.classList.toggle('pd9-win-focus', x === w));
-    drawTaskbar();
-    saveWindows();
-  }
-  function minimizeWindow(w) { w.classList.add('pd9-win-min'); w.classList.remove('pd9-win-focus'); drawTaskbar(); saveWindows(); }
-  function closeWindow(w) { recycleWindow(w); drawTaskbar(); saveWindows(); }
-  function toggleMax(w) { w.classList.toggle('pd9-win-max'); placeWin(w); saveWindows(); }
-
-  // ---------- Case window zoom (for Windows display scaling like 125%) ----------
-  // With Windows set to 125% or 150%, the screen has fewer page pixels, so Filevine
-  // inside a case window gets squeezed into its narrow layout. "Auto" draws the
-  // window's contents smaller by the same amount, so they lay out like at 100%.
-  const WIN_ZOOM_KEY = 'pd9-win-zoom';
-  const WIN_ZOOM_CHOICES = [['auto', 'Auto'], ['1', '100%'], ['0.9', '90%'], ['0.8', '80%'], ['0.75', '75%'], ['0.67', '67%']];
-  const onWindowsPc = () => {
-    try { if (navigator.userAgentData && navigator.userAgentData.platform) return /windows/i.test(navigator.userAgentData.platform); } catch (e) { /* fall back */ }
-    return /win/i.test(navigator.platform || '') || /windows/i.test(navigator.userAgent || '');
-  };
-  function winZoom() {
-    const pick = String(store.get(WIN_ZOOM_KEY, 'auto'));
-    if (pick !== 'auto') return Math.min(1, Math.max(0.5, +pick || 1));
-    const dpr = window.devicePixelRatio || 1;
-    if (!onWindowsPc() || dpr < 1.05) return 1;
-    return Math.max(0.67, Math.round((1 / dpr) * 100) / 100);
-  }
-  function applyWinZoom() {
-    if (IN_FRAME) return;
-    document.documentElement.style.setProperty('--pd9-z', String(winZoom()));
-  }
-  applyWinZoom();
-  // Moving the browser to another screen, or changing browser zoom, changes the scaling.
-  window.addEventListener('resize', () => applyWinZoom());
-
-  function placeWin(w) {
-    if (w.classList.contains('pd9-win-max')) { ['left', 'top', 'width', 'height'].forEach((k) => { w.style[k] = ''; }); return; }
-    const b = JSON.parse(w.dataset.box);
-    const vw = window.innerWidth, vh = window.innerHeight;
-    b.width = Math.min(Math.max(b.width, 360), vw - 16);
-    b.height = Math.min(Math.max(b.height, 240), vh - 68);
-    b.left = Math.min(Math.max(b.left, 8 - b.width + 120), vw - 120);
-    // Keep the bottom (and its resize corner) above the bar at the bottom of the screen.
-    b.top = Math.min(Math.max(b.top, 8), Math.max(8, vh - 60 - b.height));
-    w.dataset.box = JSON.stringify(b);
-    Object.assign(w.style, { left: `${b.left}px`, top: `${b.top}px`, width: `${b.width}px`, height: `${b.height}px` });
-  }
-
-  // While dragging or resizing, frames would swallow the mouse; turn them off for a moment.
-  const shield = (on) => document.documentElement.classList.toggle('pd9-win-busy', on);
-
-  // A spare window that has already loaded Filevine, kept out of sight. Opening a
-  // case uses it and just switches it to that case, which is much faster than
-  // starting Filevine from scratch. A new spare warms up in the background.
-  // Keep a couple of spares ready, warming one at a time so they don't slow each other down.
-  const SPARE_POOL = 2;
-  function makeSpare() {
-    if (IN_FRAME || !windowMode() || !onHub()) return;
-    const spares = document.querySelectorAll('.pd9-win-spare');
-    if (spares.length >= SPARE_POOL || [...spares].some((x) => x.dataset.warm !== '1')) return; // full, or one still warming
-    const w = openCaseWindow('', 'Spare', null, true);
-    const frame = w.querySelector('iframe');
-    frame.addEventListener('load', () => setTimeout(() => { w.dataset.warm = '1'; makeSpare(); }, 1500), { once: true });
-  }
-
-  // Closing a window keeps its Filevine running as a spare (if there's room),
-  // so the next case opens instantly instead of loading Filevine again.
-  function recycleWindow(w) {
-    if (!windowMode() || document.querySelectorAll('.pd9-win-spare').length >= SPARE_POOL) { w.remove(); return; }
-    const f = w.querySelector('iframe');
-    w.className = 'pd9-win pd9-win-spare';
-    w.setAttribute('aria-hidden', 'true');
-    w.style.zIndex = '';
-    delete w.dataset.prefetch;
-    delete w.dataset.key;
-    delete w.dataset.href;
-    delete w.dataset.auto;
-    w.dataset.pid = '';
-    w.dataset.warm = '1';
-    try { f.contentWindow.location.hash = '#/'; } catch (e) { w.remove(); }
-  }
-
-  // Hovering a case link in Window mode starts loading that case in a spare,
-  // so by the time you click, it's often already there.
-  let prefetchTimer = null;
-  function prefetchCase(id) {
-    clearTimeout(prefetchTimer);
-    prefetchTimer = setTimeout(() => {
-      if (!windowMode() || document.querySelector(`.pd9-win:not(.pd9-win-spare)[data-pid="${CSS.escape(String(id))}"]`)) return;
-      if (document.querySelector(`.pd9-win-spare[data-prefetch="${CSS.escape(String(id))}"]`)) return;
-      const spare = document.querySelector('.pd9-win-spare[data-warm="1"]:not([data-prefetch])') || document.querySelector('.pd9-win-spare[data-warm="1"]');
-      if (!spare) return;
-      spare.dataset.prefetch = String(id);
-      try { spare.querySelector('iframe').contentWindow.location.hash = `#/project/${encodeURIComponent(id)}/activity`; } catch (e) { /* ignore */ }
-    }, 120);
-  }
-  setInterval(() => { if (!STAFF && !IN_FRAME && windowMode() && onHub()) makeSpare(); }, 15000);
-  setTimeout(() => { if (!STAFF && !IN_FRAME && windowMode() && onHub()) makeSpare(); }, 2500); // start warming soon after the page loads
-
-  function openCaseWindow(id, title, restore, spare = false) {
-    const existing = document.querySelector(`.pd9-win:not(.pd9-win-spare)[data-pid="${CSS.escape(String(id))}"]`);
-    if (existing && !restore) { existing.classList.remove('pd9-win-min'); focusWindow(existing); return existing; }
-    const warm = !restore && !spare && (document.querySelector(`.pd9-win-spare[data-prefetch="${CSS.escape(String(id))}"]`)
-      || document.querySelector('.pd9-win-spare[data-warm="1"]:not([data-prefetch])') || document.querySelector('.pd9-win-spare[data-warm="1"]'));
-    if (warm) {
-      const n0 = document.querySelectorAll('.pd9-win:not(.pd9-win-spare)').length;
-      warm.classList.remove('pd9-win-spare');
-      delete warm.dataset.warm;
-      warm.dataset.pid = id;
-      warm.dataset.title = title || `Case ${id}`;
-      warm.setAttribute('aria-label', warm.dataset.title);
-      warm.querySelector('.pd9-win-title').textContent = warm.dataset.title;
-      const f = warm.querySelector('iframe');
-      f.title = warm.dataset.title;
-      const already = warm.dataset.prefetch === String(id);
-      delete warm.dataset.prefetch;
-      if (!already) {
-        try { f.contentWindow.location.hash = `#/project/${encodeURIComponent(id)}/activity`; } catch (e) { f.src = `${location.origin}${location.pathname}#/project/${encodeURIComponent(id)}/activity`; }
-      }
-      warm.dataset.box = JSON.stringify({ left: 80 + (n0 % 8) * 32, top: 70 + (n0 % 8) * 32, width: Math.min(1100, window.innerWidth - 160), height: Math.min(760, window.innerHeight - 140) });
-      placeWin(warm);
-      focusWindow(warm);
-      setTimeout(makeSpare, 4000);
-      return warm;
-    }
-    const n = document.querySelectorAll('.pd9-win:not(.pd9-win-spare)').length;
-    const w = document.createElement('section');
-    w.className = 'pd9-win';
-    w.dataset.pid = id;
-    w.dataset.title = title || `Case ${id}`;
-    w.setAttribute('role', 'dialog');
-    w.setAttribute('aria-label', w.dataset.title);
-    const box = restore && restore.box ? restore.box : {
-      left: 80 + (n % 8) * 32, top: 70 + (n % 8) * 32,
-      width: Math.min(1100, window.innerWidth - 160), height: Math.min(760, window.innerHeight - 140),
-    };
-    w.dataset.box = JSON.stringify(box);
-    w.innerHTML = `
-      <header class="pd9-win-head">
-        <span class="pd9-win-title"></span>
-        <button type="button" class="pd9-win-btn pd9-win-reload" title="Refresh" aria-label="Refresh">${REFRESH_ICON}</button>
-        <button type="button" class="pd9-win-btn pd9-win-new" title="Open in a new tab" aria-label="Open in a new tab"><svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true"><path d="M14 5h5v5M19 5l-8 8M18 14v5H5V6h5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
-        <button type="button" class="pd9-win-btn pd9-win-minbtn" title="Minimize" aria-label="Minimize"><svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true"><path d="M6 17h12" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></button>
-        <button type="button" class="pd9-win-btn pd9-win-maxbtn" title="Maximize" aria-label="Maximize"><svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="1.5" fill="none" stroke="currentColor" stroke-width="2"/></svg></button>
-        <button type="button" class="pd9-win-btn pd9-win-x" title="Close" aria-label="Close"><svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true"><path d="M7 7l10 10M17 7L7 17" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></button>
-      </header>
-      <div class="pd9-win-body"><iframe title="" loading="eager"></iframe></div>
-      <span class="pd9-win-grip" aria-hidden="true"></span>`;
-    w.querySelector('.pd9-win-title').textContent = w.dataset.title;
-    const frame = w.querySelector('iframe');
-    frame.name = 'pd9-case-window'; // so the script knows to run inside it
-    frame.title = w.dataset.title;
-    frame.src = spare ? `${location.origin}${location.pathname}#/` : (restore && restore.href) || `${location.origin}${location.pathname}#/project/${encodeURIComponent(id)}/activity`;
-    if (spare) { w.classList.add('pd9-win-spare'); w.setAttribute('aria-hidden', 'true'); }
-    document.body.appendChild(w);
-    if (restore && restore.max) w.classList.add('pd9-win-max');
-    if (restore && restore.auto) w.dataset.auto = restore.auto;
-    if (restore && restore.min) w.classList.add('pd9-win-min');
-    placeWin(w);
-
-    const head = w.querySelector('.pd9-win-head');
-    w.addEventListener('pointerdown', () => focusWindow(w), true);
-    head.addEventListener('dblclick', (e) => { if (!e.target.closest('button')) toggleMax(w); });
-    head.addEventListener('pointerdown', (e) => {
-      if (e.button !== 0 || e.target.closest('button') || w.classList.contains('pd9-win-max')) return;
-      e.preventDefault();
-      const b = JSON.parse(w.dataset.box);
-      const dx = e.clientX - b.left, dy = e.clientY - b.top;
-      head.setPointerCapture(e.pointerId);
-      shield(true);
-      const move = (ev) => { b.left = ev.clientX - dx; b.top = ev.clientY - dy; w.dataset.box = JSON.stringify(b); placeWin(w); };
-      const up = () => { head.removeEventListener('pointermove', move); head.removeEventListener('pointerup', up); shield(false); saveWindows(); };
-      head.addEventListener('pointermove', move);
-      head.addEventListener('pointerup', up);
-    });
-    const grip = w.querySelector('.pd9-win-grip');
-    grip.addEventListener('pointerdown', (e) => {
-      if (e.button !== 0 || w.classList.contains('pd9-win-max')) return;
-      e.preventDefault();
-      const b = JSON.parse(w.dataset.box);
-      const sx = e.clientX, sy = e.clientY, sw = b.width, sh = b.height;
-      grip.setPointerCapture(e.pointerId);
-      shield(true);
-      const move = (ev) => { b.width = sw + ev.clientX - sx; b.height = sh + ev.clientY - sy; w.dataset.box = JSON.stringify(b); placeWin(w); };
-      const up = () => { grip.removeEventListener('pointermove', move); grip.removeEventListener('pointerup', up); shield(false); saveWindows(); };
-      grip.addEventListener('pointermove', move);
-      grip.addEventListener('pointerup', up);
-    });
-    w.querySelector('.pd9-win-minbtn').addEventListener('click', () => minimizeWindow(w));
-    w.querySelector('.pd9-win-maxbtn').addEventListener('click', () => toggleMax(w));
-    w.querySelector('.pd9-win-x').addEventListener('click', () => closeWindow(w));
-    w.querySelector('.pd9-win-reload').addEventListener('click', () => reloadFrame(frame));
-    w.querySelector('.pd9-win-new').addEventListener('click', () => window.open(w.dataset.href || frame.src, '_blank', 'noopener'));
-    if (spare) return w;
-    if (restore && restore.z) w.style.zIndex = restore.z, winZ = Math.max(winZ, restore.z);
-    else focusWindow(w);
-    drawTaskbar();
-    saveWindows();
-    setTimeout(makeSpare, 4000);
-    return w;
-  }
-
-  // Keep each window's name in step with what it's showing. If you click into a
-  // different case inside a window, its title bar and the bottom bar follow along.
-  function frameTitle(docTitle) {
-    const t = docTitle.replace(/\s*\|\s*Filevine\s*$/i, '').trim();
-    const bar = t.indexOf('|');
-    return bar < 0 ? t : `${t.slice(bar + 1).trim()}  ${t.slice(0, bar).trim()}`; // "case number  Name", like the table
-  }
-  function syncWindowTitles() {
-    let changed = false;
-    for (const w of document.querySelectorAll('.pd9-win:not(.pd9-win-spare)')) {
-      const frame = w.querySelector('iframe');
-      let href, docTitle;
-      try { href = frame.contentWindow.location.href; docTitle = frame.contentWindow.document.title || ''; } catch (e) { continue; }
-      if (!href || href === 'about:blank') continue;
-      const key = `${href}|${docTitle}`;
-      if (w.dataset.key === key) continue;
-      w.dataset.key = key;
-      w.dataset.href = href;
-      const m = href.match(/#\/project\/(\d+)/);
-      const pid = m ? m[1] : '';
-      const moved = pid !== w.dataset.pid;
-      // Use the page's own title once the window has moved to another case (or page),
-      // and keep updating it as that page finishes loading its name.
-      if (moved) { w.dataset.pid = pid; w.dataset.auto = '1'; }
-      if (w.dataset.auto === '1' && docTitle) {
-        const title = frameTitle(docTitle) || (pid ? `Case ${pid}` : 'Filevine');
-        if (title !== w.dataset.title) {
-          w.dataset.title = title;
-          w.setAttribute('aria-label', title);
-          w.querySelector('.pd9-win-title').textContent = title;
-          frame.title = title;
-        }
-      }
-      changed = true;
-    }
-    if (changed) { drawTaskbar(); saveWindows(); }
-  }
-  setInterval(() => { if (!IN_FRAME && document.querySelector('.pd9-win')) syncWindowTitles(); }, 1000);
-
-  // Clicking inside a case window (its frame) brings that window to the front.
-  window.addEventListener('blur', () => {
-    setTimeout(() => {
-      const f = document.activeElement;
-      const w = f && f.tagName === 'IFRAME' && f.closest('.pd9-win');
-      if (w && !w.classList.contains('pd9-win-focus')) focusWindow(w);
-    }, 0);
-  });
-
-  let windowsRestored = false;
-  function keepCaseWindows() {
-    // Windows, ready windows, and the bar only show on the Project Hub. Elsewhere in
-    // this tab they're hidden (and come back when you return to the hub).
-    document.documentElement.classList.toggle('pd9-off-hub', !onHub());
-    if (windowsRestored || !onHub()) return;
-    windowsRestored = true;
-    winState().sort((a, b) => (a.z || 0) - (b.z || 0)).forEach((x) => openCaseWindow(x.id, x.title, x));
-    const top = [...document.querySelectorAll('.pd9-win:not(.pd9-win-spare):not(.pd9-win-min)')].sort((a, b) => b.style.zIndex - a.style.zIndex)[0];
-    if (top) focusWindow(top);
-  }
 
   // ---------- Share real activity across Filevine tabs ----------
   // Filevine can log you out of the whole session because one tab sat idle, even
@@ -5510,7 +5641,8 @@
   // using the filters you last had there. Anything else falls back to Filevine's
   // full search.
   const SWITCH_PARAMS_KEY = 'pd9-switch-hub-filters';
-  const SWITCH_LIST_KEY = 'pd9-switch-case-list';
+  const SWITCH_LIST_KEY = 'pd9-switch-case-list-locked';
+  try { if (store.get('pd9-switch-case-list', null)) store.set('pd9-switch-case-list', null); } catch (e) { /* ignore */ } // the old unencrypted copy
   const RECENT_KEY = 'pd9-recent-cases';
   let switchList = null; // [{ id, caseNo, name, c, lastActivity }]
   let switchListAt = 0;
@@ -5530,20 +5662,42 @@
       switchListAt = Date.now();
       return;
     }
+    // A newer list saved by another tab: unlock it in the background.
     const c = store.get(SWITCH_LIST_KEY, null);
-    if (c && c.rows && c.at > switchListAt) { switchList = c.rows; switchListAt = c.at; }
+    if (c && c.ct && c.at > switchListAt) unlockSwitchList(c);
+  }
+  // The list is saved encrypted (names and case numbers), like the PD9 table.
+  let switchUnlocking = { at: 0, p: null };
+  function unlockSwitchList(c) {
+    if (switchUnlocking.at === c.at && switchUnlocking.p) return switchUnlocking.p;
+    switchUnlocking = { at: c.at, p: unlockSwitchListNow(c) };
+    return switchUnlocking.p;
+  }
+  async function unlockSwitchListNow(c) {
+    try {
+      const who = hubCacheUser();
+      if (who && c.who && who !== c.who) return; // someone else's list
+      const rows = await openJSON(c);
+      if (Array.isArray(rows) && c.at > switchListAt) { switchList = rows; switchListAt = c.at; }
+    } catch (e) { /* can't read it: the list loads fresh when needed */ }
   }
   const switchRow = (r) => ({ id: r.id, caseNo: r.caseNo, name: r.clientName, last: r.defendant || '', lastActivity: r.lastActivity ? r.lastActivity.getTime() : 0 });
   function publishSwitchList(rows) {
     if (!rows || !rows.length) return;
     switchList = rows.map(switchRow);
     switchListAt = Date.now();
-    store.set(SWITCH_LIST_KEY, { at: switchListAt, rows: switchList });
+    const at = switchListAt;
+    sealJSON(switchList).then((sealed) => store.set(SWITCH_LIST_KEY, { at, who: hubCacheUser(), ...sealed })).catch(() => { /* saving is optional */ });
   }
+
+  // Unlock the saved list right away, so search shows your cases instantly.
+  { const c = store.get(SWITCH_LIST_KEY, null); if (c && c.ct) unlockSwitchList(c); }
 
   // Ask Filevine for the list only when there's no fresh copy (older than 10 minutes).
   async function loadSwitchList(force = false) {
     readSwitchCache();
+    const locked = store.get(SWITCH_LIST_KEY, null);
+    if (locked && locked.ct && locked.at > switchListAt) await unlockSwitchList(locked);
     if (!force && switchList && Date.now() - switchListAt < 10 * 60 * 1000) return switchList;
     const params = store.get(SWITCH_PARAMS_KEY, null);
     if (!params) return switchList || [];
@@ -5813,7 +5967,6 @@
   // Filevine sometimes rewrites its theme (when it loads, or in a case window): keep ours.
   new MutationObserver(() => {
     if (darkOn() && !DARK_SKIP) setThemeAttr(true);
-    if (!IN_FRAME && !document.documentElement.style.getPropertyValue('--pd9-z')) applyWinZoom(); // keep the case-window zoom too
   })
     .observe(document.documentElement, { attributes: true, attributeFilter: ['style'] });
   document.addEventListener('keydown', (e) => {
@@ -5823,25 +5976,13 @@
   // Another tab (or the main page, for a case window) changed it: follow along.
   window.addEventListener('focus', () => applyDark());
   setInterval(() => {
+    if (document.hidden) return; // a tab in the background doesn't need it
     if (document.documentElement.classList.contains('pd9-dark') !== darkOn()) applyDark();
     else applySeason(); // cheap; also catches the date rolling over to a new season
-  }, 2000);
+  }, 5000);
   applyDark();
 
-  function addSwitchButton() {
-    if (document.getElementById('pd9-switch-btn')) return;
-    const input = searchInput();
-    if (!input) return;
-    const host = document.getElementById('pd9-name-btn') || input.closest('.search') || input.closest('.fvs-autocomplete') || input.parentElement;
-    const btn = document.createElement('button');
-    btn.id = 'pd9-switch-btn';
-    btn.type = 'button';
-    btn.className = 'pd9-head-btn';
-    btn.title = 'Switch case (Ctrl+Space)';
-    btn.innerHTML = `<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="M7 7h11l-3-3M17 17H6l3 3" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg><span>Switch case</span><kbd class="pd9-kbd">${/Mac/i.test(navigator.platform) ? '\u2303Space' : 'Ctrl Space'}</kbd>`;
-    btn.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); openSwitcher(); });
-    host.after(btn);
-  }
+
 
   // ---------- Esc: snap back, then minimize, then close the note/task box ----------
   // If you moved or resized the box, the first Esc puts it back in Filevine's
@@ -6449,7 +6590,8 @@
         <span class="pd9-ff-count" role="status" aria-live="polite"></span>
         <button type="button" class="pd9-ff-more" hidden title="Filevine loads the newest items first. This loads the older ones so the search covers everything.">Search older items</button>`;
       const box = $('input', bar);
-      box.placeholder = onTasksPage() ? 'Search tasks' : 'Search activity (words or a date like 10/2)';
+      box.placeholder = onTasksPage() ? 'Search tasks' : 'Search activity or a date';
+      box.title = onTasksPage() ? 'Search the tasks on this page' : 'Search words in the activity, or a date like 10/2';
       box.setAttribute('aria-label', box.placeholder);
       box.value = ff.query;
       box.addEventListener('input', () => { ff.query = box.value.trim(); clearTimeout(ff.timer); ff.timer = setTimeout(ffApply, 120); });
@@ -6492,7 +6634,7 @@
     if (IN_FRAME) return;
     if (document.title !== tabSetTitle) tabRealTitle = document.title;
     let no = '';
-    if (side && side.open) {
+    if (side && side.open && !side.one) {
       try { no = shortCaseNo(side.frame.contentWindow.document.title); } catch (e) { /* use the row */ }
       if (!no) no = shortCaseNo(`| ${side.caseNo || ''}`);
     } else if (inCase()) no = shortCaseNo(tabRealTitle);
@@ -6505,7 +6647,7 @@
     }
   }
   if (!IN_FRAME) {
-    setInterval(keepTabTitle, 700);
+    setInterval(() => { if (!document.hidden) keepTabTitle(); }, 1500);
     window.addEventListener('hashchange', () => setTimeout(keepTabTitle, 50));
   }
 
@@ -6519,7 +6661,12 @@
   const SIDE_KEY = 'pd9-side-panel';
   const SIDE_W_KEY = 'pd9-side-list-width';
   const SIDE_FRAME = 'pd9-panel';
-  const sidePanel = () => !STAFF && !IN_FRAME && store.get(SIDE_KEY, true) && !windowMode();
+  const sidePanel = () => !STAFF && !IN_FRAME && store.get(SIDE_KEY, true);
+  // One copy (the default): the case opens in this same page, Filevine slides
+  // over to the right of the PD9 table, and only one copy of Filevine runs.
+  // Off ("classic"): the case loads in a frame on the right (a second copy).
+  // Stac view always uses one copy (the old "case in a frame" option is gone).
+  const stacOne = () => true;
   if (IN_FRAME && window.name === SIDE_FRAME) document.documentElement.classList.add('pd9-in-panel');
   const SIDE_EASE = 'cubic-bezier(.16, 1, .3, 1)';
   const SIDE_MS = 380;
@@ -6579,8 +6726,29 @@
 
   // Load a case into the frame. If the frame already has Filevine running,
   // only the address changes (no reload), so switching cases is quick.
+  // One copy: Filevine shows "Project not found" if you switch cases while the
+  // last one is still loading. So the address changes at most once every
+  // SIDE_NAV_GAP ms; quick clicks in a row go straight to the last one clicked.
+  const SIDE_NAV_GAP = 700;
+  let sideNavAt = 0;
+  let sideNavTimer = 0;
+  function sideGo(id) {
+    clearTimeout(sideNavTimer);
+    if (!side || !side.one || side.id !== String(id)) return; // another case was picked since
+    const m = location.hash.match(/^#\/project\/(\d+)/);
+    if (m && m[1] === String(id)) return;
+    const wait = sideNavAt + SIDE_NAV_GAP - Date.now();
+    if (wait > 0) { sideNavTimer = setTimeout(() => sideGo(id), wait); return; }
+    sideNavAt = Date.now();
+    location.hash = caseHash(id); // Filevine switches pages in place: no reload
+  }
   function sideLoad(id) {
     const s = sideEnsure();
+    if (s.one) {
+      s.id = String(id); // right away, so the list and arrow keys move on at once
+      sideGo(id);
+      return;
+    }
     let here = s.id;
     try { if (s.ready) here = (s.frame.contentWindow.location.hash.match(/^#\/project\/(\d+)/) || [])[1] || null; } catch (e) { /* keep s.id */ }
     if (s.id === String(id) && here === s.id) return;
@@ -6597,9 +6765,20 @@
   // Warm up: start loading the case you hover, so it is ready when you click.
   let sideWarmTimer = 0;
   function sideWarm(id) {
-    if (!sidePanel() || (side && side.open)) return;
+    if (!sidePanel() || stacOne() || (side && side.open)) return;
     clearTimeout(sideWarmTimer);
-    sideWarmTimer = setTimeout(() => { if (!side || !side.ready || !side.open) sideLoad(id); }, 250);
+    sideWarmTimer = setTimeout(() => { if (!side || !side.ready || !side.open) sideLoad(id); }, 90);
+  }
+
+  // Start Filevine in the case panel as soon as the PD9 table is up, with the
+  // first case in the table, so the first click only switches cases inside it.
+  let sidePreloaded = false;
+  function sidePreload() {
+    if (sidePreloaded || !sidePanel() || stacOne() || !onHub() || (side && side.id) || !hubTable || !hubTable.rows || !hubTable.rows.length) return;
+    sidePreloaded = true;
+    const first = $('#pd9-hub-sorted tbody tr[data-id]');
+    const id = first ? first.dataset.id : hubTable.rows[0].id;
+    if (!side || !side.id) sideLoad(id); // right away: no waiting
   }
 
   function sideLayout(listW = sideListWidth()) {
@@ -6607,16 +6786,24 @@
     const root = document.documentElement;
     root.style.setProperty('--pd9-cp-top', `${top}px`);
     root.style.setProperty('--pd9-cp-list', `${listW}px`);
+    const t = document.querySelector('#pd9-hub-sorted.pd9-hs-docked .pd9-hs-wrap table');
+    if (t) fitHubColumns(t);
   }
 
   function sideOpen(r) {
     if (!r) return;
     const ov = document.getElementById('pd9-hub-sorted');
     const s = sideEnsure();
+    if (!s.open) {
+      s.one = stacOne();
+      if (s.one && onHub()) s.hubHash = location.hash; // where Close goes back to
+      s.opening = true; // changing the page address runs the page checks right away
+    }
     sideLoad(r.id);
+    s.opening = false;
     s.caseNo = r.caseNo || '';
     setTimeout(keepTabTitle, 0);
-    $('.pd9-cp-title', s.panel).textContent = `${r.caseNo || ''}  ${r.defendant || r.clientName || ''}`.trim();
+    $('.pd9-cp-title', s.panel).textContent = `${r.caseNo ? formatCaseNo(r.caseNo) : ''}  ${r.defendant || r.clientName || ''}`.trim();
     rememberRecent(r.id);
     $$('#pd9-hub-sorted tr.pd9-row-open').forEach((tr) => tr.classList.remove('pd9-row-open'));
     const tr = ov && $(`tr[data-id="${CSS.escape(String(r.id))}"]`, ov);
@@ -6639,7 +6826,8 @@
       document.body.appendChild(ov);
       void ov.offsetWidth;
       ov.classList.add('pd9-hs-docked');
-      setTimeout(() => { if (side && side.open) Object.keys(LEFT_PANES).forEach((k) => stacPaneEnsure(k)); }, SIDE_MS + 300); // preload Tasks and Feed
+      // Load the shared Tasks/Feed panel quietly in the background, so it opens fast.
+      setTimeout(() => { if (side && side.open && !leftPane) stacPaneGo('tasks'); }, SIDE_MS + 1500);
       stacFindReset();
       stacFindEnsure(ov);
       drawOwnTable(ov);
@@ -6652,21 +6840,27 @@
       }
     }
     document.documentElement.classList.add('pd9-cp-open');
-    // Keep Filevine's header menus (search results, account menu) above the panel.
+    document.documentElement.classList.toggle('pd9-stac-one', !!s.one);
     const header = $('.app-header');
     if (header && !header.dataset.pd9Z) {
       header.dataset.pd9Z = '1';
       if (getComputedStyle(header).position === 'static') header.style.position = 'relative';
       header.style.zIndex = '9002';
     }
-    s.panel.classList.add('pd9-cp-show');
+    if (!s.one) s.panel.classList.add('pd9-cp-show');
     setTimeout(() => { if (ov) { ov.classList.remove('pd9-hs-docking'); if (ov.classList.contains('pd9-hs-docked')) drawOwnTable(ov); } }, SIDE_MS + 40);
   }
 
-  function sideClose() {
+  // nav = false when Stac view is closing because you already went somewhere else.
+  function sideClose(nav = true) {
     if (!side || !side.open) return;
     side.open = false;
+    side.fromPane = '';
+    const one = side.one;
+    document.documentElement.classList.remove('pd9-stac-one');
     stacPaneHide();
+    // One copy: go back to the Project Hub (same filters as before).
+    if (one && nav && !onHub()) location.hash = side.hubHash || '#/projecthub';
     setTimeout(keepTabTitle, 0);
     const ov = document.getElementById('pd9-hub-sorted');
     side.panel.classList.remove('pd9-cp-show');
@@ -6685,11 +6879,38 @@
       ov.classList.remove('pd9-hs-docked');
       stacFindReset();
       setTimeout(() => {
-        if (home) home.appendChild(ov); else ov.remove(); // the Project Hub redraws it if its spot is gone
+        if (one) { ov.classList.add('pd9-hs-parked'); if (onHub()) showOwnTable(); } // tucked away until the Project Hub is back (showOwnTable puts it back)
+        else if (home) home.appendChild(ov); else ov.remove(); // the Project Hub redraws it if its spot is gone
         ov.classList.remove('pd9-hs-docking', 'pd9-hs-undocking');
         if (ov.isConnected) drawOwnTable(ov); // all the columns again
       }, SIDE_MS);
     }
+  }
+
+  // One copy: a thin handle on the table's right edge to make it wider or narrower.
+  if (!IN_FRAME && !STAFF) {
+    const grip = document.createElement('div');
+    grip.id = 'pd9-stac-grip';
+    grip.title = 'Drag to resize';
+    grip.setAttribute('aria-hidden', 'true');
+    grip.addEventListener('pointerdown', (e) => {
+      e.preventDefault();
+      grip.setPointerCapture(e.pointerId);
+      document.documentElement.classList.add('pd9-cp-resizing');
+      const move = (ev) => sideLayout(Math.min(Math.max(ev.clientX, 320), window.innerWidth - 480));
+      const up = () => {
+        grip.removeEventListener('pointermove', move);
+        grip.removeEventListener('pointerup', up);
+        document.documentElement.classList.remove('pd9-cp-resizing');
+        const w = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--pd9-cp-list'));
+        if (w) store.set(SIDE_W_KEY, Math.round(w));
+      };
+      grip.addEventListener('pointermove', move);
+      grip.addEventListener('pointerup', up);
+    });
+    const placeGrip = () => { if (document.body && !grip.isConnected) document.body.appendChild(grip); };
+    placeGrip();
+    document.addEventListener('DOMContentLoaded', placeGrip);
   }
 
   // ----- Stac mode search: one box above the docked PD9 table -----
@@ -6699,8 +6920,8 @@
   let stacQuery = '';
   let stacAuto = 0;
   const flatNo = (t) => String(t || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
-  function stacRowMatch(r) {
-    const q = stacQuery.trim();
+  function stacRowMatch(r, query = stacQuery) {
+    const q = String(query || '').trim();
     if (!q) return true;
     const cq = readCaseQuery(q);
     const c = readCaseNumbers(r.caseNo)[0];
@@ -6711,6 +6932,17 @@
     return want.length > 0 && want.every((w) => have.some((h) => h.startsWith(w)));
   }
   const stacMode = (q) => (readCaseQuery(q).length ? 'case' : 'name');
+  // Search box above the full PD9 table: case number or name (same as the Stac
+  // search), or any words found in the tags, the next event, or the case number.
+  let hubQuery = '';
+  function hubRowMatch(r) {
+    const q = hubQuery.trim();
+    if (!q) return true;
+    if (stacRowMatch(r, q)) return true;
+    const e = nextOf(r);
+    const hay = `${r.caseNo || ''} ${flatNo(r.caseNo)} ${r.defendant || ''} ${r.clientName || ''} ${r.tags.map((t) => t.name).join(' ')} ${e && e.title ? e.title : ''}`.toLowerCase();
+    return q.toLowerCase().split(/\s+/).every((w) => hay.includes(w.replace(/^#/, '')));
+  }
   function stacSearchAll(box, q) {
     const out = $('.pd9-case-results', box);
     const m = SEARCH_MODES[stacMode(q)];
@@ -6725,8 +6957,9 @@
     box = document.createElement('div');
     box.id = 'pd9-stac-find';
     box.dataset.keep = '1';
+    box.dataset.nomine = '1'; // your cases are already in the table below
     box.innerHTML = `
-      <div class="pd9-sf-row">${MAGNIFIER}<input type="search" autocomplete="off" spellcheck="false" aria-label="Search cases" placeholder="Name or case # (Enter searches all of Filevine)"><button type="button" class="pd9-sf-x" title="Clear" aria-label="Clear" hidden>\u00d7</button></div>
+      <div class="pd9-sf-row">${MAGNIFIER}<input type="search" autocomplete="off" spellcheck="false" aria-label="Search cases" placeholder="Name or case #" title="Filters your cases as you type. Press Enter to search all of Filevine."><button type="button" class="pd9-sf-x" title="Clear" aria-label="Clear" hidden>\u00d7</button></div>
       <div class="pd9-sf-hint"></div>
       <div class="pd9-case-results" aria-live="polite"></div>
       <button type="button" class="pd9-go" hidden></button>`;
@@ -6779,16 +7012,19 @@
   // ----- Stac view: Tasks or Feed on the left -----
   // With a case open, the Tasks or Feed button at the top shows that Filevine
   // page on the left, in place of the case list (no header, no filter column).
-  // Both load in the background when Stac view opens, so they show right away.
-  // Click a case name in an item and it opens on the right. \u00d7, Esc, the same
-  // button again, or Project Hub brings the case list back.
+  // Tasks and Feed share ONE frame (one extra copy of Filevine, not two). It
+  // loads quietly in the background once Stac view opens, then stays ready, and switching
+  // between them is just a page change inside it. Click a case name in an item
+  // and it opens on the right. \u00d7, Esc, the same button again, or Project
+  // Hub brings the case list back.
   const LEFT_PANES = {
-    tasks: { label: 'Tasks', hash: '#/tasks', frame: 'pd9-tasks' },
-    feed: { label: 'Feed', hash: '#/feed', frame: 'pd9-feed' },
+    tasks: { label: 'Tasks', hash: '#/tasks' },
+    feed: { label: 'Feed', hash: '#/feed' },
   };
-  const stacPanes = {}; // kind -> { pane, frame }
+  const LEFT_FRAME = 'pd9-leftpane';
+  let leftPane = null; // { pane, frame, kind }
   const leftPaneKind = (href) => Object.keys(LEFT_PANES).find((k) => new RegExp(`${LEFT_PANES[k].hash.replace('/', '\\/')}(?![a-z])`, 'i').test(String(href || ''))) || '';
-  if (IN_FRAME && Object.values(LEFT_PANES).some((k) => k.frame === window.name)) {
+  if (IN_FRAME && window.name === LEFT_FRAME) {
     document.documentElement.classList.add('pd9-in-leftpane');
     document.addEventListener('click', (e) => {
       const a = e.target.closest && e.target.closest('a[href*="#/project/"]');
@@ -6806,50 +7042,92 @@
       window.parent.postMessage({ pd9: 'closeLeftPane' }, location.origin);
     });
   }
-  // Always this site's own address, with the page part (#/tasks..., #/feed...) from the button.
-  const leftPaneUrl = (kind, href) => {
-    const k = LEFT_PANES[kind];
-    const src = href || ($(`a.primary-nav-item[href*="${k.hash}"]`) || {}).href || '';
+  // The page part (#/tasks..., #/feed...) from the button, on this site's own address.
+  const leftPaneHash = (kind, href) => {
+    const src = href || ($(`a.primary-nav-item[href*="${LEFT_PANES[kind].hash}"]`) || {}).href || '';
     const h = String(src).match(/#\/[a-z]+.*$/i);
-    return `${location.origin}${location.pathname}${h && leftPaneKind(h[0]) === kind ? h[0] : k.hash}`;
+    return h && leftPaneKind(h[0]) === kind ? h[0] : LEFT_PANES[kind].hash;
   };
-  function stacPaneEnsure(kind, href) {
-    if (stacPanes[kind]) return stacPanes[kind];
-    const k = LEFT_PANES[kind];
+  const leftPaneUrl = (kind, href) => `${location.origin}${location.pathname}${leftPaneHash(kind, href)}`;
+  function stacPaneEnsure() {
+    if (leftPane) return leftPane;
     const pane = document.createElement('section');
     pane.className = 'pd9-leftpane';
-    pane.dataset.kind = kind;
-    pane.setAttribute('aria-label', k.label);
     pane.innerHTML = `
       <header class="pd9-cp-head">
-        <span class="pd9-cp-title">${k.label}</span>
+        <span class="pd9-cp-title"></span>
         <button type="button" class="pd9-cp-btn pd9-tp-reload" title="Refresh" aria-label="Refresh">${REFRESH_ICON}</button>
-        <button type="button" class="pd9-cp-btn pd9-tp-tab" title="Open ${k.label} in a new tab" aria-label="Open ${k.label} in a new tab"><svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true"><path d="M14 5h5v5M19 5l-8 8M18 14v5H5V6h5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+        <button type="button" class="pd9-cp-btn pd9-tp-tab" title="Open in a new tab" aria-label="Open in a new tab"><svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true"><path d="M14 5h5v5M19 5l-8 8M18 14v5H5V6h5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
         <button type="button" class="pd9-cp-btn pd9-tp-x" title="Back to your cases (Esc)" aria-label="Back to your cases"><svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="M7 7l10 10M17 7L7 17" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></button>
       </header>
-      <div class="pd9-cp-body"><iframe name="${k.frame}" title="${k.label}"></iframe></div>`;
+      <div class="pd9-cp-body"><iframe name="${LEFT_FRAME}" title="Tasks and Feed"></iframe></div>`;
     document.body.appendChild(pane);
     const frame = $('iframe', pane);
-    frame.src = leftPaneUrl(kind, href);
-    stacPanes[kind] = { pane, frame };
-    $('.pd9-tp-x', pane).addEventListener('click', () => stacPaneHide());
+    leftPane = { pane, frame, kind: '', loaded: false };
+    frame.addEventListener('load', () => { leftPane.loaded = true; });
+    $('.pd9-tp-x', pane).addEventListener('click', () => { if (side && side.open && side.fromPane) sideClose(); else stacPaneHide(); });
     $('.pd9-tp-reload', pane).addEventListener('click', () => reloadFrame(frame));
-    $('.pd9-tp-tab', pane).addEventListener('click', () => window.open(leftPaneUrl(kind), '_blank'));
-    return stacPanes[kind];
+    $('.pd9-tp-tab', pane).addEventListener('click', () => {
+      let h = LEFT_PANES[leftPane.kind] ? LEFT_PANES[leftPane.kind].hash : '#/tasks';
+      try { h = frame.contentWindow.location.hash || h; } catch (e) { /* keep it */ }
+      window.open(`${location.origin}${location.pathname}${h}`, '_blank');
+    });
+    return leftPane;
   }
-  const stacPaneShown = () => Object.keys(stacPanes).find((k) => stacPanes[k].pane.classList.contains('pd9-tp-show')) || '';
+  // Point the shared frame at Tasks or Feed: a quick page change once it's loaded.
+  function stacPaneGo(kind, href) {
+    const lp = stacPaneEnsure();
+    const hash = leftPaneHash(kind, href);
+    lp.kind = kind;
+    lp.pane.dataset.kind = kind;
+    lp.pane.setAttribute('aria-label', LEFT_PANES[kind].label);
+    $('.pd9-cp-title', lp.pane).textContent = LEFT_PANES[kind].label;
+    try {
+      if (lp.loaded && lp.frame.contentWindow.location.pathname === location.pathname) {
+        if (leftPaneKind(lp.frame.contentWindow.location.hash) !== kind) lp.frame.contentWindow.location.hash = hash;
+        return;
+      }
+    } catch (e) { /* load it fresh */ }
+    if (!lp.frame.src || leftPaneKind(lp.frame.src) !== kind) { lp.loaded = false; lp.frame.src = leftPaneUrl(kind, href); }
+  }
+  const stacPaneShown = () => (leftPane && leftPane.pane.classList.contains('pd9-tp-show') ? leftPane.kind : '');
   function stacPaneShow(kind, href) {
-    Object.keys(stacPanes).forEach((k) => { if (k !== kind) stacPanes[k].pane.classList.remove('pd9-tp-show'); });
-    stacPaneEnsure(kind, href).pane.classList.add('pd9-tp-show');
+    stacPaneGo(kind, href);
+    const x = $('.pd9-tp-x', leftPane.pane);
+    const tip = side && side.fromPane ? 'Close the case (Esc)' : 'Back to your cases (Esc)';
+    x.title = tip;
+    x.setAttribute('aria-label', tip.replace(' (Esc)', ''));
+    leftPane.pane.classList.add('pd9-tp-show');
     document.documentElement.classList.add('pd9-leftpane-open');
   }
   function stacPaneHide() {
-    Object.values(stacPanes).forEach((t) => t.pane.classList.remove('pd9-tp-show'));
+    if (leftPane) leftPane.pane.classList.remove('pd9-tp-show');
     document.documentElement.classList.remove('pd9-leftpane-open');
   }
 
+  // On the Tasks or Feed page (top window, Stac mode, one copy): remember the
+  // name of the case link you click, and start loading the left pane when you
+  // point at a case link, so it's ready when the case opens.
+  let paneLinkClick = null;
+  if (!IN_FRAME && !STAFF) {
+    const caseLink = (e) => e.target.closest && e.target.closest('a[href*="#/project/"]');
+    const paneReady = () => sidePanel() && stacOne() && leftPaneKind(location.hash) && !(side && side.open);
+    document.addEventListener('click', (e) => {
+      const a = caseLink(e);
+      if (!a || !paneReady()) return;
+      const id = (a.getAttribute('href').match(/#\/project\/(\d+)/) || [])[1];
+      const title = (a.getAttribute('aria-label') || a.textContent || '').replace(/^\s*go to project:\s*/i, '').trim();
+      if (id) paneLinkClick = { id, title, at: Date.now() };
+    }, true);
+    document.addEventListener('mouseover', (e) => {
+      if (!caseLink(e) || !paneReady()) return;
+      const kind = leftPaneKind(location.hash);
+      if (!leftPane || !leftPane.frame.src || leftPaneKind(leftPane.frame.src) !== kind) stacPaneGo(kind, location.href);
+    }, true);
+  }
+
   // Open a case on the right from anywhere on the Project Hub (switcher, search results).
-  const stacActive = () => sidePanel() && onHub();
+  const stacActive = () => sidePanel() && (onHub() || !!(side && side.open && side.one));
   function stacOpenCase(id, title = '') {
     const row = hubTable && hubTable.rows && hubTable.rows.find((r) => r.id === String(id));
     const t = String(title);
@@ -6860,7 +7138,7 @@
   // Stac mode: N, T, C and template shortcuts pressed on the Project Hub go to
   // the case on the right.
   function sideForwardKey(e, msg) {
-    if (!side || !side.open || !side.ready || isTyping(e) || document.querySelector('.pd9-overlay')) return false;
+    if (!side || !side.open || side.one || !side.ready || isTyping(e) || document.querySelector('.pd9-overlay')) return false;
     e.preventDefault();
     e.stopImmediatePropagation();
     try {
@@ -6886,22 +7164,62 @@
       if (form && isVisible(form) && isVisible($(SEL.message, form))) return;
       try { window.parent.postMessage({ pd9: 'closePanel' }, location.origin); } catch (err) { /* ignore */ }
     });
+    // Alt+Up / Alt+Down inside the case: previous / next case in the PD9 table.
+    document.addEventListener('keydown', (e) => {
+      if (!e.altKey || e.ctrlKey || e.metaKey || e.shiftKey || (e.key !== 'ArrowUp' && e.key !== 'ArrowDown') || isTyping(e)) return;
+      e.preventDefault();
+      try { window.parent.postMessage({ pd9: 'stepCase', dir: e.key === 'ArrowUp' ? -1 : 1 }, location.origin); } catch (err) { /* ignore */ }
+    });
   }
   if (!IN_FRAME && !STAFF) {
     window.addEventListener('message', (e) => {
       if (e.origin !== location.origin || !e.data) return;
       if (e.data.pd9 === 'closePanel' && side && e.source === side.frame.contentWindow) sideClose();
-      const fromPane = Object.values(stacPanes).some((t) => e.source === t.frame.contentWindow);
-      if (fromPane && e.data.pd9 === 'closeLeftPane') stacPaneHide();
+      if (e.data.pd9 === 'stepCase' && side && e.source === side.frame.contentWindow) stacStep(e.data.dir < 0 ? -1 : 1);
+      const fromPane = !!(leftPane && e.source === leftPane.frame.contentWindow);
+      if (fromPane && e.data.pd9 === 'closeLeftPane') { if (side && side.open && side.fromPane) sideClose(); else stacPaneHide(); }
       if (fromPane && e.data.pd9 === 'openCase' && e.data.id && side && side.open) stacOpenCase(String(e.data.id), String(e.data.title || ''));
     });
+  }
+
+  // Step to the previous / next case in the PD9 table (as it is sorted and
+  // filtered right now); the case on the right follows.
+  function stacStep(dir) {
+    if (!side || !side.open || !hubTable || !hubTable.rows) return;
+    const trs = $$('#pd9-hub-sorted tbody tr[data-id]');
+    if (!trs.length) return;
+    const at = trs.findIndex((tr) => tr.dataset.id === String(side.id));
+    const next = trs[at < 0 ? 0 : Math.min(trs.length - 1, Math.max(0, at + dir))];
+    if (!next || next.dataset.id === String(side.id)) return;
+    const r = hubTable.rows.find((x) => String(x.id) === next.dataset.id);
+    if (!r) return;
+    sideOpen(r);
+    next.scrollIntoView({ block: 'nearest' });
   }
 
   if (!IN_FRAME && !STAFF) {
     document.addEventListener('keydown', (e) => {
       if (e.key !== 'Escape' || !side || !side.open || isTyping(e) || document.querySelector('.pd9-overlay')) return;
+      if (side.one) {
+        // The case is on this page: let Esc close Filevine's own things first.
+        if (e.defaultPrevented || document.querySelector('[role="dialog"]:not([hidden]), .modal.in, .modal.show')) return;
+        const form = $(SEL.docked);
+        if (form && isVisible(form) && isVisible($(SEL.message, form))) return;
+      }
       e.preventDefault();
-      if (stacPaneShown()) stacPaneHide(); else sideClose();
+      if (stacPaneShown() && !side.fromPane) stacPaneHide(); else sideClose();
+    });
+    // Up / Down (or Alt+Up / Alt+Down) with a case open: previous / next case.
+    // With one copy the case is on this page too, so plain arrows step only
+    // after you last clicked in the table; elsewhere they scroll as usual.
+    let lastInTable = false;
+    document.addEventListener('pointerdown', (e) => { lastInTable = !!(e.target.closest && e.target.closest('#pd9-hub-sorted')); }, true);
+    document.addEventListener('keydown', (e) => {
+      if ((e.key !== 'ArrowUp' && e.key !== 'ArrowDown') || e.ctrlKey || e.metaKey || e.shiftKey) return;
+      if (!side || !side.open || stacPaneShown() || isTyping(e) || document.querySelector('.pd9-overlay, #pd9-usdrop:not([hidden]), #pd9-docprev')) return;
+      if (side.one && !e.altKey && !lastInTable) return;
+      e.preventDefault();
+      stacStep(e.key === 'ArrowUp' ? -1 : 1);
     });
     window.addEventListener('resize', () => {
       if (!side || !side.open) return;
@@ -6916,7 +7234,39 @@
     window.addEventListener('hashchange', (e) => {
       const was = (String(e.oldURL || '').match(/#.*$/) || [''])[0];
       const id = (location.hash.match(/^#\/project\/(\d+)/) || [])[1];
+      if (side && side.open && side.one) {
+        if (id) { // moved to another case (a link inside Filevine, Back/Forward)
+          if (id !== side.id) {
+            side.id = id;
+            $$('#pd9-hub-sorted tr.pd9-row-open').forEach((tr) => tr.classList.remove('pd9-row-open'));
+            const tr = $(`#pd9-hub-sorted tr[data-id="${CSS.escape(id)}"]`);
+            if (tr) { tr.classList.add('pd9-row-open'); tr.scrollIntoView({ block: 'nearest' }); }
+            setTimeout(keepTabTitle, 0);
+          }
+          return;
+        }
+        sideClose(false); // the Project Hub (Back) or another page: put Stac view away
+        return;
+      }
+      // Stac view from Tasks or Feed (one copy): the case opens on the right and
+      // that same page (Tasks or Feed) shows on the left. Closing goes back to it.
+      const fromKind = leftPaneKind(was);
+      if (sidePanel() && stacOne() && fromKind && id && !(side && side.open)) {
+        const s = sideEnsure();
+        s.hubHash = was;
+        s.fromPane = fromKind;
+        const t = paneLinkClick && paneLinkClick.id === id && Date.now() - paneLinkClick.at < 5000 ? paneLinkClick.title : '';
+        stacOpenCase(id, t);
+        stacPaneShow(fromKind, `${location.origin}${location.pathname}${was}`);
+        return;
+      }
       if (sidePanel() && /^#\/projecthub/i.test(was) && id) {
+        if (stacOne()) { // a case link on the hub: open it in Stac view, here
+          sideEnsure().hubHash = was;
+          const row = hubTable && hubTable.rows && hubTable.rows.find((x) => String(x.id) === id);
+          sideOpen(row || { id, caseNo: '', clientName: '' });
+          return;
+        }
         location.replace(`${location.origin}${location.pathname}${was}`);
         stacOpenCase(id);
         return;
@@ -6933,6 +7283,13 @@
       e.stopImmediatePropagation();
       const href = a.getAttribute('href');
       const kind = leftPaneKind(href);
+      if (side.fromPane) { // opened from Tasks or Feed: no case list to go back to
+        if (/#\/projecthub/i.test(href)) { sideClose(false); location.hash = new URL(a.href, location.href).hash; }
+        else if (kind && stacPaneShown() === kind) sideClose(); // back to the full Tasks / Feed page
+        else if (kind) stacPaneShow(kind, a.href);
+        else window.open(a.href, '_blank');
+        return;
+      }
       if (/#\/projecthub/i.test(href)) { if (stacPaneShown()) stacPaneHide(); else sideClose(); }
       else if (kind) { if (stacPaneShown() === kind) stacPaneHide(); else stacPaneShow(kind, a.href); }
       else window.open(a.href, '_blank');
@@ -7244,16 +7601,17 @@
     watchProject();
     addOptionsMenuItem();
     addCloseButton();
+    layoutSentenceForm();
+    moveFpdaUp();
     addCloseHints();
     if (!IN_FRAME) {
-      addCaseSearchButton();
+      addImprovedSearch();
       applyCaseFilter();
       keepAdvanced();
       if (!STAFF) {
         rewriteHubLinks();
         showHubEvents();
         showOwnTable();
-        keepCaseWindows();
       }
       if (STAFF) addTaskTriage();
     }
@@ -7261,7 +7619,6 @@
     addJailButton();
     addBenchmarkButton();
     addDepoButton();
-    if (!STAFF) addSwitchButton();
     addDocPreview();
     addFormHelpers();
     addFeedSearch();
@@ -7497,35 +7854,6 @@
     .fvqn-warn[hidden], .fvqn-bar[hidden], .fvqn-restore[hidden] { display: none !important; }
     /* Hide the Trending Tags box above the feed */
     .top-tags-note-filter { display: none !important; }
-    /* ---------- Sentence form: closing-a-case order ----------
-       Only the order on screen changes. Filevine saves the same fields as before.
-       The rows are flattened so fields can move between them, then each field
-       gets a place in line based on its name. Fields not listed go last. */
-    form.project-item-edit-form:has([name^="sentencetype"]):has([name^="dispositionaction"]) .custom-item-body > .flex-grid { display: flex !important; flex-wrap: wrap; }
-    form.project-item-edit-form:has([name^="sentencetype"]):has([name^="dispositionaction"]) .custom-item-body > .flex-grid > .form-group.row { display: contents !important; }
-    form.project-item-edit-form:has([name^="sentencetype"]):has([name^="dispositionaction"]) .custom-item-body > .flex-grid > .form-group.row > .custom-field { order: 200; float: none !important; flex: 0 0 100%; max-width: 100%; width: 100% !important; box-sizing: border-box; }
-    @media (min-width: 700px) { form.project-item-edit-form:has([name^="sentencetype"]):has([name^="dispositionaction"]) .custom-item-body > .flex-grid > .form-group.row > .custom-field { flex-basis: 50%; max-width: 50%; width: 50% !important; } }
-    @media (min-width: 1200px) { form.project-item-edit-form:has([name^="sentencetype"]):has([name^="dispositionaction"]) .custom-item-body > .flex-grid > .form-group.row > .custom-field { flex-basis: 25%; max-width: 25%; width: 25% !important; } }
-    form.project-item-edit-form:has([name^="sentencetype"]):has([name^="dispositionaction"]) .custom-item-body > .flex-grid > .form-group.row > .custom-field:has([name^="dispositionaction"]) { order: 10; }
-    form.project-item-edit-form:has([name^="sentencetype"]):has([name^="dispositionaction"]) .custom-item-body > .flex-grid > .form-group.row > .custom-field:has([name^="sentencetype"]) { order: 20; }
-    form.project-item-edit-form:has([name^="sentencetype"]):has([name^="dispositionaction"]) .custom-item-body > .flex-grid > .form-group.row > .custom-field:has([name^="othersentencetype"]) { order: 21; }
-    form.project-item-edit-form:has([name^="sentencetype"]):has([name^="dispositionaction"]) .custom-item-body > .flex-grid > .form-group.row > .custom-field:has([name^="amount"]):not(:has([name^="amounttype"])) { order: 22; }
-    form.project-item-edit-form:has([name^="sentencetype"]):has([name^="dispositionaction"]) .custom-item-body > .flex-grid > .form-group.row > .custom-field:has([name^="amounttype"]) { order: 23; }
-    form.project-item-edit-form:has([name^="sentencetype"]):has([name^="dispositionaction"]) .custom-item-body > .flex-grid > .form-group.row > .custom-field:has([name^="sentencedate"]) { order: 30; }
-    form.project-item-edit-form:has([name^="sentencetype"]):has([name^="dispositionaction"]) .custom-item-body > .flex-grid > .form-group.row > .custom-field:has([name^="dispositiondate"]) { order: 31; }
-    form.project-item-edit-form:has([name^="sentencetype"]):has([name^="dispositionaction"]) .custom-item-body > .flex-grid > .form-group.row > .custom-field:has([name^="adjudicated"]) { order: 40; }
-    form.project-item-edit-form:has([name^="sentencetype"]):has([name^="dispositionaction"]) .custom-item-body > .flex-grid > .form-group.row > .custom-field:has([name^="sentenceguideline"]) { order: 50; }
-    form.project-item-edit-form:has([name^="sentencetype"]):has([name^="dispositionaction"]) .custom-item-body > .flex-grid > .form-group.row > .custom-field:has([name^="guidelinerange"]) { order: 51; }
-    form.project-item-edit-form:has([name^="sentencetype"]):has([name^="dispositionaction"]) .custom-item-body > .flex-grid > .form-group.row > .custom-field:has([name^="f2_downwarddeparture"]) { order: 60; }
-    form.project-item-edit-form:has([name^="sentencetype"]):has([name^="dispositionaction"]) .custom-item-body > .flex-grid > .form-group.row > .custom-field:has([name^="downwarddeparture"]) { order: 61; }
-    form.project-item-edit-form:has([name^="sentencetype"]):has([name^="dispositionaction"]) .custom-item-body > .flex-grid > .form-group.row > .custom-field:has([name^="lowestdocsentencemonths"]) { order: 70; }
-    form.project-item-edit-form:has([name^="sentencetype"]):has([name^="dispositionaction"]) .custom-item-body > .flex-grid > .form-group.row > .custom-field:has([name^="enhancement"]) { order: 80; }
-    form.project-item-edit-form:has([name^="sentencetype"]):has([name^="dispositionaction"]) .custom-item-body > .flex-grid > .form-group.row > .custom-field:has([name^="sexenhancementdesignation"]) { order: 90; }
-    form.project-item-edit-form:has([name^="sentencetype"]):has([name^="dispositionaction"]) .custom-item-body > .flex-grid > .form-group.row > .custom-field:has([name^="dispositiontype"]) { order: 100; }
-    form.project-item-edit-form:has([name^="sentencetype"]):has([name^="dispositionaction"]) .custom-item-body > .flex-grid > .form-group.row > .custom-field:has([name^="dispositionchargereason"]) { order: 101; }
-    form.project-item-edit-form:has([name^="sentencetype"]):has([name^="dispositionaction"]) .custom-item-body > .flex-grid > .form-group.row > .custom-field:has([name^="notes"]) { order: 110; }
-    form.project-item-edit-form:has([name^="sentencetype"]):has([name^="dispositionaction"]) .custom-item-body > .flex-grid > .form-group.row > .custom-field:has([name^="dispositionnotes"]) { order: 120; }
-    form.project-item-edit-form:has([name^="sentencetype"]):has([name^="dispositionaction"]) .custom-item-body > .flex-grid > .form-group.row > .custom-field:has(textarea) { flex-basis: 100% !important; max-width: 100% !important; width: 100% !important; }
     /* ---------- Improver Options window ---------- */
     .pd9-zoomopt { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; color: #475467; margin-right: 6px; white-space: nowrap; }
     .pd9-zoomopt select { font: inherit; padding: 4px 6px; border: 1px solid #d0d5dd; border-radius: 6px; background: #fff; }
@@ -7539,18 +7867,18 @@
       border-radius: 8px; box-shadow: 0 12px 40px rgba(0, 0, 0, .3); font: inherit; font-size: 14px; overflow: hidden;
     }
     .pd9-overlay .pd9-head { display: flex; align-items: center; padding: 16px 20px; border-bottom: 1px solid var(--t-color-border, #dfe3e8); }
-    .pd9-overlay h2 { margin: 0; font-size: 18px; font-weight: 600; flex: 1; }
+    .pd9-overlay h2 { margin: 0; font-size: 18px; font-weight: 500; flex: 1; }
     .pd9-overlay .pd9-x { border: 0; background: none; cursor: pointer; color: inherit; padding: 4px; border-radius: 4px; display: flex; }
     .pd9-overlay .pd9-x:hover { background: var(--t-color-object-1-secondary, #eef2f7); }
     .pd9-overlay .pd9-body { display: flex; min-height: 0; flex: 1; }
     .pd9-overlay .pd9-side { width: 220px; border-right: 1px solid var(--t-color-border, #dfe3e8); padding: 14px; display: flex; flex-direction: column; gap: 8px; overflow: auto; }
-    .pd9-overlay .pd9-section { font-size: 12px; font-weight: 600; opacity: .7; }
+    .pd9-overlay .pd9-section { font-size: 12px; font-weight: 500; opacity: .7; }
     .pd9-overlay .pd9-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
     .pd9-overlay .pd9-list li { padding: 8px 10px; border-radius: 6px; cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .pd9-overlay .pd9-list li:hover { background: var(--t-color-object-1-secondary, #eef2f7); }
-    .pd9-overlay .pd9-list li[aria-selected="true"] { background: var(--t-color-object-1-secondary, #e3ecfb); font-weight: 600; }
+    .pd9-overlay .pd9-list li[aria-selected="true"] { background: var(--t-color-object-1-secondary, #e3ecfb); font-weight: 500; }
     .pd9-overlay .pd9-form { flex: 1; padding: 14px 20px 22px; display: flex; flex-direction: column; gap: 12px; overflow: auto; }
-    .pd9-overlay label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; font-weight: 600; }
+    .pd9-overlay label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; font-weight: 500; }
     .pd9-overlay input, .pd9-overlay textarea {
       font: inherit; font-size: 14px; font-weight: 400; color: inherit; background: var(--t-color-surface, #fff);
       border: 1px solid var(--t-color-border, #c9ced6); border-radius: 4px; padding: 8px 10px; width: 100%; box-sizing: border-box;
@@ -7564,7 +7892,7 @@
     .pd9-overlay .pd9-foot { padding: 12px 20px; border-top: 1px solid var(--t-color-border, #dfe3e8); }
     .pd9-overlay .pd9-grow { flex: 1; }
     .pd9-overlay .pd9-btn {
-      font: inherit; font-size: 13px; font-weight: 600; padding: 8px 14px; border-radius: 4px; cursor: pointer;
+      font: inherit; font-size: 13px; font-weight: 500; padding: 8px 14px; border-radius: 4px; cursor: pointer;
       border: 1px solid var(--t-color-border, #c9ced6); background: var(--t-color-surface, #fff); color: inherit;
     }
     .pd9-overlay .pd9-btn:hover:not(:disabled) { background: var(--t-color-object-1-secondary, #eef2f7); }
@@ -7577,6 +7905,27 @@
       .pd9-overlay .pd9-body { flex-direction: column; }
       .pd9-overlay .pd9-side { width: auto; border-right: 0; border-bottom: 1px solid var(--t-color-border, #dfe3e8); }
     }
+    /* Case Summary: FPDA up with User Status */
+    .flex-grid.pd9-csum { display: flex !important; flex-wrap: wrap; margin-left: -15px; margin-right: -15px; }
+    .pd9-csum > .pd9-csum-flat { display: contents !important; }
+    .pd9-csum > .pd9-csum-keep { flex: 0 0 100%; max-width: 100%; margin-left: 0; margin-right: 0; }
+    .pd9-csum > .pd9-csum-flat > * { float: none !important; margin-bottom: 15px; }
+    .pd9-csum > .pd9-csum-flat > .pd9-csum-eq, .pd9-csum .pd9-csum-eq { flex: 1 1 170px; width: auto !important; max-width: none !important; }
+    .pd9-csum > .pd9-csum-br { flex: 0 0 100%; height: 0; }
+    /* Sentence form: grouped layout */
+    form .flex-grid.pd9-sf { display: grid !important; flex-wrap: initial; grid-template-columns: repeat(6, minmax(0, 1fr)); column-gap: 16px; align-items: start; container-type: inline-size; }
+    .pd9-sf > * { grid-column: 1 / -1; float: none !important; width: auto !important; }
+    .pd9-sf > .pd9-sf-row { display: contents; }
+    .pd9-sf .pd9-sf-row > .custom-field { order: 900; grid-column: span 3; width: auto !important; max-width: none !important; float: none !important; margin-bottom: 12px; }
+    .pd9-sf .custom-field .form-control { max-width: 100%; }
+    .pd9-sf textarea.form-control { width: 100%; min-height: 90px; height: 120px; }
+    .pd9-sf .pd9-sf-head { margin: 14px 0 8px; padding-bottom: 4px; border-bottom: 1px solid var(--t-color-border, #dfe3e8); font-size: 12px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; opacity: .75; }
+    .pd9-sf .pd9-sf-head[data-sec="out"] { margin-top: 4px; }
+    .pd9-sf .pd9-sf-head button { padding: 0; border: 0; background: none; color: inherit; font: inherit; letter-spacing: inherit; text-transform: inherit; cursor: pointer; }
+    .pd9-sf .pd9-sf-head button i { display: inline-block; width: 10px; transition: transform .15s; }
+    .pd9-sf.pd9-sf-open .pd9-sf-head button i { transform: rotate(90deg); }
+    .pd9-sf:not(.pd9-sf-open) [data-pd9-sec="more"] { display: none !important; }
+    @container (max-width: 560px) { .pd9-sf .pd9-sf-row > .custom-field { grid-column: 1 / -1 !important; } }
     /* Improved Close */
     .pd9-hint { font-size: 12px; line-height: 1.35; opacity: .72; margin: -2px 0 4px; }
     .pd9-overlay .pd9-small { width: min(460px, 100%); }
@@ -7586,60 +7935,64 @@
       background: var(--t-color-surface, #fff); color: var(--t-color-text, #1f2933); font: inherit; font-size: 14px;
       border-radius: 8px; box-shadow: 0 12px 40px rgba(0, 0, 0, .3); padding: 16px 18px; border-top: 4px solid #e8590c;
     }
-    .pd9-panel h3 { margin: 0 0 8px; font-size: 16px; font-weight: 600; }
+    .pd9-panel h3 { margin: 0 0 8px; font-size: 16px; font-weight: 500; }
     .pd9-panel ul { margin: 0 0 14px; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 6px; }
     .pd9-panel li.pd9-warn { color: #b42318; }
     .pd9-panel-btns { display: flex; justify-content: flex-end; gap: 8px; }
     .pd9-panel .pd9-btn {
-      font: inherit; font-size: 13px; font-weight: 600; padding: 8px 14px; border-radius: 4px; cursor: pointer;
+      font: inherit; font-size: 13px; font-weight: 500; padding: 8px 14px; border-radius: 4px; cursor: pointer;
       border: 1px solid var(--t-color-border, #c9ced6); background: var(--t-color-surface, #fff); color: inherit;
     }
     .pd9-panel .pd9-primary { background: #1f2933; border-color: #1f2933; color: #fff; }
     .pd9-panel .pd9-btn:disabled { opacity: .6; cursor: default; }
     /* Case # Search */
+    /* Improved search (top bar) */
+    .search.pd9-us-on > :not(#pd9-usearch) { display: none !important; }
+    #pd9-usearch { position: relative; display: flex; align-items: center; flex: 1; min-width: 260px; }
+    #pd9-usearch > :first-child { flex: 1; min-width: 0; }
+    #pd9-usearch .fvs-text-field-input { padding-right: 38px; }
+    #pd9-usearch .pd9-us-switch { position: absolute; right: 4px; top: 50%; transform: translateY(-50%); display: grid; place-items: center; width: 30px; height: 30px; padding: 0; border: 0; border-radius: 6px;
+      background: transparent; color: #fff; opacity: .75; cursor: pointer; z-index: 2; }
+    #pd9-usearch .pd9-us-switch:hover { opacity: 1; background: rgba(255, 255, 255, .12); }
+    #pd9-usearch.pd9-us-off { flex: none; min-width: 0; margin-right: 6px; order: 9; }
+    #pd9-usearch.pd9-us-off > :first-child { display: none; }
+    #pd9-usearch.pd9-us-off .pd9-us-switch { position: static; transform: none; width: 34px; height: 34px; border: 1px solid rgba(255, 255, 255, .35); }
+    .search:has(#pd9-usearch.pd9-us-off) { display: flex; align-items: center; }
+    #pd9-usdrop { position: fixed; z-index: 100005; max-height: min(70vh, 640px); display: flex; flex-direction: column; padding: 10px 12px 8px; border-radius: 10px;
+      background: var(--t-color-background-primary, #fff); color: var(--t-color-text-primary, #1d2433); box-shadow: 0 0 0 1px rgba(16, 24, 40, .1), 0 16px 40px -12px rgba(16, 24, 40, .4); font-size: 14px; }
+    #pd9-usdrop[hidden] { display: none; }
+    #pd9-usdrop .pd9-case-results { flex: 1; min-height: 0; overflow: auto; }
+    #pd9-usdrop .pd9-case-status { display: flex; align-items: center; gap: 8px; font-weight: 500; margin-bottom: 4px; }
+    #pd9-usdrop .pd9-us-hint { font-weight: 400; font-size: 12.5px; color: var(--t-color-text-secondary, #667085); }
+    #pd9-usdrop .pd9-case-mine { margin: 6px 0 2px; font-size: 12px; font-weight: 500; color: var(--t-color-text-secondary, #667085); }
+    #pd9-usdrop .pd9-spin { width: 14px; height: 14px; border-radius: 50%; border: 2px solid #c9ced6; border-top-color: #1f2933; animation: pd9spin .8s linear infinite; }
+    #pd9-usdrop .pd9-case-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 1px; }
+    #pd9-usdrop .pd9-case-list a { display: flex; flex-direction: column; gap: 2px; padding: 7px 8px; border-radius: 6px; color: inherit; text-decoration: none; }
+    #pd9-usdrop .pd9-case-list a:hover, #pd9-usdrop .pd9-case-list a:focus-visible { background: var(--t-color-object-1-secondary, #eef2f7); outline: none; }
+    #pd9-usdrop .pd9-case-title { font-weight: 500; color: var(--accent, #1f7a77); }
+    #pd9-usdrop .pd9-hit-mine .pd9-case-title { font-weight: 600; }
+    #pd9-usdrop .pd9-case-details { font-size: 12px; opacity: .75; }
+    #pd9-usdrop .pd9-case-note { margin-top: 6px; font-size: 12px; opacity: .75; }
+    #pd9-usdrop .pd9-us-foot { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--t-color-border-primary, #e9ecf1);
+      font-size: 12px; color: var(--t-color-text-secondary, #667085); }
+    #pd9-usdrop .pd9-us-adv { border: 0; background: none; padding: 2px 4px; color: var(--t-color-text-link-rest, #1f7a77); font: inherit; font-weight: 500; cursor: pointer; }
+    html.pd9-dark #pd9-usdrop { background: #1b1f25; color: #e6e8ec; box-shadow: 0 0 0 1px #2c323c, 0 18px 40px -12px rgba(0, 0, 0, .7); }
+    html.pd9-dark #pd9-usdrop .pd9-case-list a:hover, html.pd9-dark #pd9-usdrop .pd9-case-list a:focus-visible { background: #262b34; }
+    html.pd9-dark #pd9-usdrop .pd9-case-title { color: #4fd1c1; }
+    html.pd9-season #pd9-usdrop .pd9-case-title { color: var(--ss-accent); }
     .pd9-head-btn {
       display: inline-flex; align-items: center; gap: 6px; margin-left: 8px; padding: 6px 10px; cursor: pointer;
-      font: inherit; font-size: 13px; font-weight: 600; color: #fff; background: transparent;
+      font: inherit; font-size: 13px; font-weight: 500; color: #fff; background: transparent;
       border: 1px solid rgba(255, 255, 255, .55); border-radius: 4px; white-space: nowrap; align-self: center;
     }
     .pd9-head-btn:hover { background: rgba(255, 255, 255, .12); }
     .pd9-head-btn:focus-visible { outline: 2px solid #fff; outline-offset: 2px; }
-    #pd9-case {
-      position: fixed; z-index: 100000; width: 330px; padding: 14px; font: inherit; font-size: 13px;
-      background: var(--t-color-surface, #fff); color: var(--t-color-text, #1f2933);
-      border-radius: 8px; box-shadow: 0 12px 40px rgba(0, 0, 0, .3);
-    }
-    #pd9-case label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; font-weight: 600; }
-    #pd9-case input {
-      font: inherit; font-size: 14px; font-weight: 400; color: inherit; background: var(--t-color-surface, #fff);
-      border: 1px solid var(--t-color-border, #c9ced6); border-radius: 4px; padding: 7px 9px; width: 100%; box-sizing: border-box;
-    }
-    #pd9-case input:focus { outline: 2px solid var(--t-color-focus, #2563eb); outline-offset: -1px; }
-    #pd9-case .pd9-panel-btns { display: flex; justify-content: flex-end; align-items: center; gap: 8px; }
-    #pd9-case .pd9-btn {
-      font: inherit; font-size: 13px; font-weight: 600; padding: 7px 14px; border-radius: 4px; cursor: pointer;
-      border: 1px solid var(--t-color-border, #c9ced6); background: var(--t-color-surface, #fff); color: inherit;
-    }
-    #pd9-case .pd9-primary { background: #1f2933; border-color: #1f2933; color: #fff; }
-    #pd9-case { width: 380px; max-height: calc(100vh - 90px); overflow: auto; }
-    #pd9-case .pd9-case-mine { margin: 6px 0 2px; font-size: 11.5px; font-weight: 600; color: #667085; }
-    #pd9-case .pd9-hit-mine .pd9-case-title { font-weight: 700; }
-    #pd9-case .pd9-case-results:empty { display: none; }
-    #pd9-case .pd9-case-results { margin-top: 12px; border-top: 1px solid var(--t-color-border, #dfe3e8); padding-top: 10px; }
-    #pd9-case .pd9-case-status { display: flex; align-items: center; gap: 8px; font-weight: 600; margin-bottom: 6px; }
-    #pd9-case .pd9-spin { width: 14px; height: 14px; border-radius: 50%; border: 2px solid #c9ced6; border-top-color: #1f2933; animation: pd9spin .8s linear infinite; }
     @keyframes pd9spin { to { transform: rotate(360deg); } }
     @media (prefers-reduced-motion: reduce) { #pd9-case .pd9-spin { animation-duration: 2.4s; } }
-    #pd9-case .pd9-case-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
-    #pd9-case .pd9-case-list a { display: flex; flex-direction: column; gap: 2px; padding: 8px; border-radius: 6px; color: inherit; text-decoration: none; }
     #pd9-case .pd9-case-list a:hover, #pd9-case .pd9-case-list a:focus-visible { background: var(--t-color-object-1-secondary, #eef2f7); outline: none; }
-    #pd9-case .pd9-case-title { font-weight: 600; color: #2b7a78; }
-    #pd9-case .pd9-case-details { font-size: 12px; opacity: .75; }
-    #pd9-case .pd9-case-note { margin-top: 8px; font-size: 12px; opacity: .75; }
-    #pd9-case .pd9-case-help { margin: 8px 0 12px; font-size: 12px; line-height: 1.4; opacity: .8; }
     #pd9-case-badge {
       position: fixed; z-index: 100000; pointer-events: none; padding: 3px 8px; border-radius: 4px;
-      background: #e8590c; color: #fff; font-size: 12px; font-weight: 600; white-space: nowrap;
+      background: #e8590c; color: #fff; font-size: 12px; font-weight: 500; white-space: nowrap;
     }
     /* Advanced Name Search window */
     #pd9-adv.pd9-adv-enter { animation: pd9AdvIn .18s ease-out; }
@@ -7661,12 +8014,12 @@
     #pd9-adv.pd9-min h3 { cursor: pointer; }
     #pd9-adv .pd9-adv-head { display: flex; align-items: center; gap: 4px; padding: 10px 12px; border-bottom: 1px solid var(--t-color-border, #dfe3e8); cursor: move; user-select: none; touch-action: none; }
     #pd9-adv.pd9-dragging { opacity: .92; }
-    #pd9-adv h3 { margin: 0; font-size: 15px; font-weight: 600; flex: 1; }
+    #pd9-adv h3 { margin: 0; font-size: 15px; font-weight: 500; flex: 1; }
     #pd9-adv .pd9-adv-head button { border: 0; background: none; color: inherit; cursor: pointer; padding: 4px; border-radius: 4px; display: flex; }
     #pd9-adv .pd9-adv-head button:hover { background: var(--t-color-object-1-secondary, #eef2f7); }
     #pd9-adv .pd9-adv-body { display: flex; flex-direction: column; min-height: 0; flex: 1; padding: 10px 12px 12px; gap: 8px; }
     #pd9-adv .pd9-adv-search { display: flex; gap: 8px; align-items: center; }
-    #pd9-adv .pd9-adv-hidearch { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; font-weight: 600; white-space: nowrap; cursor: pointer; }
+    #pd9-adv .pd9-adv-hidearch { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; font-weight: 500; white-space: nowrap; cursor: pointer; }
     #pd9-adv .pd9-adv-hidearch input { flex: none; width: 16px; height: 16px; margin: 0; padding: 0; }
 
     #pd9-adv input {
@@ -7674,27 +8027,27 @@
       border: 1px solid var(--t-color-border, #c9ced6); border-radius: 4px; padding: 7px 9px;
     }
     #pd9-adv input:focus { outline: 2px solid var(--t-color-focus, #2563eb); outline-offset: -1px; }
-    #pd9-adv .pd9-btn { font: inherit; font-size: 13px; font-weight: 600; padding: 7px 14px; border-radius: 4px; cursor: pointer; border: 1px solid #1f2933; }
+    #pd9-adv .pd9-btn { font: inherit; font-size: 13px; font-weight: 500; padding: 7px 14px; border-radius: 4px; cursor: pointer; border: 1px solid #1f2933; }
     #pd9-adv .pd9-primary { background: #1f2933; color: #fff; }
-    #pd9-adv .pd9-adv-status { display: flex; align-items: center; gap: 6px; font-weight: 600; min-height: 18px; }
+    #pd9-adv .pd9-adv-status { display: flex; align-items: center; gap: 6px; font-weight: 500; min-height: 18px; }
     #pd9-adv .pd9-spin { width: 14px; height: 14px; border-radius: 50%; border: 2px solid #c9ced6; border-top-color: #1f2933; animation: pd9spin .8s linear infinite; }
     #pd9-adv .pd9-adv-table-wrap { overflow: auto; min-height: 0; flex: 1; }
     #pd9-adv table { border-collapse: collapse; width: 100%; }
-    #pd9-adv th { position: sticky; top: 0; background: var(--t-color-surface, #fff); text-align: left; font-size: 12px; font-weight: 600; opacity: .8; padding: 6px 8px; border-bottom: 1px solid var(--t-color-border, #dfe3e8); white-space: nowrap; }
+    #pd9-adv th { position: sticky; top: 0; background: var(--t-color-surface, #fff); text-align: left; font-size: 12px; font-weight: 500; opacity: .8; padding: 6px 8px; border-bottom: 1px solid var(--t-color-border, #dfe3e8); white-space: nowrap; }
     #pd9-adv th button { all: unset; cursor: pointer; display: inline-flex; align-items: center; gap: 2px; }
     #pd9-adv th button:hover { text-decoration: underline; }
     #pd9-adv th button:focus-visible { outline: 2px solid var(--t-color-focus, #2563eb); outline-offset: 2px; border-radius: 2px; }
     #pd9-adv th[aria-sort="ascending"], #pd9-adv th[aria-sort="descending"] { opacity: 1; }
     #pd9-adv td { padding: 6px 8px; border-bottom: 1px solid var(--t-color-border, #eef0f3); vertical-align: top; }
     #pd9-adv td:nth-child(2) { white-space: nowrap; }
-    #pd9-adv td a { color: #2b7a78; font-weight: 600; text-decoration: none; }
+    #pd9-adv td a { color: #2b7a78; font-weight: 500; text-decoration: none; }
     #pd9-adv td a:hover { text-decoration: underline; }
     #pd9-adv .pd9-closed { opacity: .7; }
-    #pd9-adv .pd9-open { font-weight: 600; }
+    #pd9-adv .pd9-open { font-weight: 500; }
     .pd9-grow { flex: 1; }
     #pd9-adv .pd9-charges-btn, #pd9-hub-sorted .pd9-charges-btn {
       all: unset; cursor: pointer; display: inline-flex; align-items: center; gap: 4px; white-space: nowrap;
-      color: #2b7a78; font-weight: 600; font-size: 13px; text-decoration: underline; text-underline-offset: 3px;
+      color: var(--accent, #2b7a78); font-weight: 500; font-size: 12.5px; text-decoration: none; padding: 2px 6px; margin-left: -6px; border-radius: 6px;
     }
     #pd9-adv .pd9-charges-btn::after, #pd9-hub-sorted .pd9-charges-btn::after { content: "›"; font-size: 15px; line-height: 1; text-decoration: none; }
     #pd9-adv .pd9-charges-btn:hover, #pd9-hub-sorted .pd9-charges-btn:hover { background: var(--t-color-object-1-secondary, #eef2f7); }
@@ -7703,11 +8056,11 @@
     .pd9-charges-modal .pd9-charges-dialog { width: min(980px, 100%); }
     .pd9-charges-modal .pd9-charges-wrap { overflow: auto; max-height: 55vh; border: 1px solid var(--t-color-border, #dfe3e8); border-radius: 6px; }
     .pd9-charges-modal .pd9-charges-table { border-collapse: collapse; width: 100%; font-size: 13px; user-select: text; }
-    .pd9-charges-modal .pd9-charges-table th { position: sticky; top: 0; background: var(--t-color-surface, #fff); text-align: left; font-size: 12px; font-weight: 600; padding: 7px 10px; border-bottom: 1px solid var(--t-color-border, #dfe3e8); white-space: nowrap; }
+    .pd9-charges-modal .pd9-charges-table th { position: sticky; top: 0; background: var(--t-color-surface, #fff); text-align: left; font-size: 12px; font-weight: 500; padding: 7px 10px; border-bottom: 1px solid var(--t-color-border, #dfe3e8); white-space: nowrap; }
     .pd9-charges-modal .pd9-charges-table td { padding: 7px 10px; border-bottom: 1px solid var(--t-color-border, #eef0f3); vertical-align: top; }
     .pd9-charges-modal .pd9-charges-table tr:nth-child(even) td { background: rgba(0, 0, 0, .025); }
     .pd9-charges-modal .pd9-charges-note { margin: 0 0 8px; font-size: 12px; opacity: .75; }
-    .pd9-charges-modal .pd9-adv-status { display: flex; align-items: center; gap: 8px; font-weight: 600; }
+    .pd9-charges-modal .pd9-adv-status { display: flex; align-items: center; gap: 8px; font-weight: 500; }
     .pd9-charges-modal .pd9-spin { width: 14px; height: 14px; border-radius: 50%; border: 2px solid #c9ced6; border-top-color: #1f2933; animation: pd9spin .8s linear infinite; }
 
     .pd9-charges-modal .pd9-charges-case { margin: 0; font-size: 13px; opacity: .75; }
@@ -7727,28 +8080,30 @@
     .pd9-movable .header button, .pd9-movable .header [role="button"] { cursor: pointer; }
     .pd9-movable .note-input-wrapper { max-height: none !important; }
     .pd9-movable.pd9-dragging { opacity: .92; user-select: none; }
-    .pd9-overlay .pd9-hk { float: right; font-size: 11px; font-weight: 600; opacity: .6; }
+    .pd9-overlay .pd9-hk { float: right; font-size: 12px; font-weight: 500; opacity: .6; }
     .pd9-overlay .pd9-tagwrap .pd9-hk-clear { flex: none; }
     /* PD9 (alternate) Project Hub table
        Palette: ink #1d2433, slate #667085, line #e9ecf1, header #f8f9fb, accent #1f7a77, soon #c2410c.
        Quiet rows; the one bold element is the Next Event date tile. */
     #pd9-hub-sorted {
-      --ink: #1d2433; --slate: #667085; --line: #e9ecf1; --head: #f8f9fb; --accent: #1f7a77; --soon: #c2410c;
+      /* Clean CRM look: system font, thin column lines, short rows, no zebra stripes. */
+      --ink: #1d2433; --slate: #667085; --line: #e9ecf1; --col-line: #f0f2f5; --head: #ffffff; --hover: #f6f8fa; --chip: #f2f4f7; --accent: #1f7a77; --soon: #c2410c;
       position: absolute; inset: 0; z-index: 50; display: flex; flex-direction: column;
-      background: #fff; color: var(--ink); font-family: var(--pd9-font, inherit); font-size: 14px;
-      border: 1px solid var(--line); border-radius: 10px; overflow: hidden;
+      background: #fff; color: var(--ink); font-size: 14px; line-height: 1.4;
+      font-family: var(--pd9-font, inherit);
+      border: 1px solid var(--line); border-radius: 8px; overflow: hidden;
       font-variant-numeric: tabular-nums;
     }
-    #pd9-hub-sorted .pd9-hs-bar { position: relative; display: flex; align-items: center; flex-wrap: wrap; row-gap: 4px; padding: 7px 14px; border-bottom: 1px solid var(--line); font-size: 13px; color: var(--slate); }
+    #pd9-hub-sorted .pd9-hs-bar { position: relative; display: flex; align-items: center; flex-wrap: wrap; row-gap: 4px; min-height: 36px; padding: 5px 12px; border-bottom: 1px solid var(--line); font-size: 12.5px; color: var(--slate); }
     #pd9-hub-sorted .pd9-hs-track { position: absolute; left: 0; right: 0; bottom: -1px; height: 2px; }
     #pd9-hub-sorted .pd9-hs-progress { display: block; height: 100%; width: 0; background: var(--accent); transition: width .3s ease; }
     #pd9-hub-sorted .pd9-hs-progress[hidden] { display: none; }
     #pd9-hub-sorted .pd9-hs-wrap { flex: 1; overflow: auto; }
     #pd9-hub-sorted table { border-collapse: separate; border-spacing: 0; table-layout: fixed; min-width: 100%; }
     #pd9-hub-sorted th {
-      position: sticky; top: 0; z-index: 1; height: 34px; padding: 0 14px; text-align: left; white-space: nowrap; overflow: hidden;
-      background: var(--head); color: var(--slate); font-size: 12px; font-weight: 600; letter-spacing: .01em;
-      border-bottom: 1px solid var(--line); cursor: grab;
+      position: sticky; top: 0; z-index: 1; height: 30px; padding: 0 12px; text-align: left; white-space: nowrap; overflow: hidden;
+      background: var(--head); color: var(--slate); font-size: 12.5px; font-weight: 500;
+      border-bottom: 1px solid var(--line); border-right: 1px solid var(--col-line); cursor: grab;
     }
     #pd9-hub-sorted th.pd9-sorted { color: var(--ink); }
     #pd9-hub-sorted th button { all: unset; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; max-width: 100%; }
@@ -7757,38 +8112,39 @@
     #pd9-hub-sorted th:hover .pd9-sort-arrow, #pd9-hub-sorted th.pd9-sorted .pd9-sort-arrow { opacity: 1; }
     #pd9-hub-sorted th.pd9-sorted .pd9-sort-arrow { color: var(--accent); }
     #pd9-hub-sorted .pd9-col-grip { position: absolute; top: 0; right: 0; width: 10px; height: 100%; cursor: col-resize; }
-    #pd9-hub-sorted .pd9-col-grip::after { content: ""; position: absolute; top: 30%; bottom: 30%; right: 4px; width: 2px; border-radius: 1px; background: var(--line); transition: background .15s; }
+    #pd9-hub-sorted .pd9-col-grip::after { content: ""; position: absolute; top: 25%; bottom: 25%; right: 3px; width: 2px; border-radius: 1px; background: transparent; transition: background .15s; }
     #pd9-hub-sorted th:hover .pd9-col-grip::after { background: #c9ced6; }
     #pd9-hub-sorted .pd9-col-grip:hover::after { background: var(--accent); }
     #pd9-hub-sorted th.pd9-dragging-col { opacity: .45; }
     #pd9-hub-sorted th.pd9-drop-target { box-shadow: inset 2px 0 0 var(--accent); }
     #pd9-hub-sorted td {
-      height: 44px; padding: 0 14px; vertical-align: middle; border-bottom: 1px solid var(--line);
+      height: 36px; padding: 0 12px; vertical-align: middle; border-bottom: 1px solid var(--line); border-right: 1px solid var(--col-line);
       white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
     }
     #pd9-hub-sorted tbody tr { transition: background .12s; }
-    #pd9-hub-sorted tbody tr:nth-child(even) { background: #fafbfc; } /* subtle every-other-row shading */
-    #pd9-hub-sorted tbody tr:hover { background: #eef6f6; }
-    #pd9-hub-sorted tbody tr:hover td:first-child { box-shadow: inset 2px 0 0 var(--accent); }
+    #pd9-hub-sorted th:last-child, #pd9-hub-sorted td:last-child { border-right: 0; }
+    #pd9-hub-sorted tbody tr:hover { background: var(--hover); }
     #pd9-hub-sorted tbody tr:last-child td { border-bottom: 0; }
-    #pd9-hub-sorted td a { color: var(--accent); font-weight: 600; text-decoration: none; }
+    #pd9-hub-sorted td a { color: var(--accent); font-weight: 500; text-decoration: none; }
+    /* Case numbers: same font, even-width digits so they line up */
+    #pd9-hub-sorted td[data-key="caseNo"], #pd9-hub-sorted td[data-key="caseNo"] a { font-weight: 500; font-variant-numeric: tabular-nums; }
     #pd9-hub-sorted td a:hover { text-decoration: underline; text-underline-offset: 3px; }
     #pd9-hub-sorted td a:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 3px; }
     #pd9-hub-sorted td[data-key="defendant"] { font-weight: 500; }
     #pd9-hub-sorted td[data-key="lastActivity"], #pd9-hub-sorted td[data-key="event"] { color: var(--slate); }
     #pd9-hub-sorted .pd9-own-pending { color: var(--slate); font-weight: 400; }
     /* The date tile */
-    #pd9-hub-sorted .pd9-when { display: inline-flex; flex-direction: column; line-height: 1.15; padding-left: 8px; border-left: 3px solid var(--line); }
-    #pd9-hub-sorted .pd9-when-day { font-weight: 600; color: var(--ink); }
-    #pd9-hub-sorted .pd9-when-time { font-size: 11.5px; color: var(--slate); }
-    #pd9-hub-sorted .pd9-when.pd9-soon { border-left-color: var(--soon); }
-    #pd9-hub-sorted .pd9-when.pd9-soon .pd9-when-day { color: var(--soon); }
-    #pd9-hub-sorted .pd9-none { font-size: 13px; color: #98a2b3; }
+    #pd9-hub-sorted .pd9-when { display: inline-flex; align-items: baseline; gap: 6px; max-width: 100%; padding: 2px 8px; border-radius: 6px; background: var(--chip); line-height: 1.3; }
+    #pd9-hub-sorted .pd9-when-day { font-weight: 500; color: var(--ink); }
+    #pd9-hub-sorted .pd9-when-time { font-size: 12px; color: var(--slate); }
+    #pd9-hub-sorted .pd9-when.pd9-soon { background: color-mix(in srgb, var(--soon) 11%, transparent); }
+    #pd9-hub-sorted .pd9-when.pd9-soon .pd9-when-day, #pd9-hub-sorted .pd9-when.pd9-soon .pd9-when-time { color: var(--soon); }
+    #pd9-hub-sorted .pd9-none { font-size: 12.5px; color: #98a2b3; }
     #pd9-hub-sorted .pd9-skel-line { display: block; width: 70%; height: 10px; border-radius: 5px; background: linear-gradient(90deg, #eef0f3 25%, #f6f7f9 50%, #eef0f3 75%); background-size: 200% 100%; animation: pd9Skel 1.2s linear infinite; }
     /* Tags */
     #pd9-hub-sorted .pd9-own-tags { white-space: nowrap; line-height: 1.5; }
     #pd9-hub-sorted .pd9-tag {
-      display: inline-block; margin: 0 4px 0 0; padding: 1px 8px; border-radius: 6px; font-size: 11.5px; font-weight: 600; line-height: 1.6;
+      display: inline-block; margin: 0 4px 0 0; padding: 0 6px; border-radius: 4px; font-size: 12px; font-weight: 500; line-height: 1.7;
       color: color-mix(in srgb, var(--pd9-tag, var(--accent)) 85%, #000);
       background: color-mix(in srgb, var(--pd9-tag, var(--accent)) 12%, #fff);
       box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--pd9-tag, var(--accent)) 22%, transparent);
@@ -7798,16 +8154,16 @@
     #pd9-hub-sorted button.pd9-tag:hover { box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--pd9-tag, var(--accent)) 55%, transparent); }
     #pd9-hub-sorted .pd9-tag.pd9-tag-on { color: #fff; background: color-mix(in srgb, var(--pd9-tag, var(--accent)) 88%, #000); box-shadow: none; }
     #pd9-hub-sorted button.pd9-tag:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
-    #pd9-hub-sorted .pd9-tag-funnel { all: unset; display: inline-flex; align-items: center; gap: 3px; margin-left: 8px; padding: 2px 5px; border-radius: 5px; color: var(--slate); cursor: pointer; font-size: 11px; font-weight: 700; vertical-align: middle; }
+    #pd9-hub-sorted .pd9-tag-funnel { all: unset; display: inline-flex; align-items: center; gap: 3px; margin-left: 8px; padding: 2px 5px; border-radius: 5px; color: var(--slate); cursor: pointer; font-size: 12px; font-weight: 600; vertical-align: middle; }
     #pd9-hub-sorted .pd9-tag-funnel:hover { background: rgba(16, 24, 40, .06); color: var(--ink); }
     #pd9-hub-sorted .pd9-tag-funnel.pd9-funnel-on { color: var(--accent); background: #e3f1f0; }
     #pd9-hub-sorted .pd9-tag-funnel:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
     #pd9-hub-sorted .pd9-hs-filters { display: inline-flex; align-items: center; gap: 6px; margin-left: 14px; flex-wrap: wrap; }
     #pd9-hub-sorted .pd9-hs-lead { color: var(--slate); }
-    #pd9-hub-sorted .pd9-hs-chip { border: 0; padding: 2px 6px 2px 9px; border-radius: 6px; background: #e3f1f0; color: #155e5b; font: inherit; font-size: 12px; font-weight: 600; cursor: pointer; }
+    #pd9-hub-sorted .pd9-hs-chip { border: 0; padding: 2px 6px 2px 9px; border-radius: 6px; background: #e3f1f0; color: #155e5b; font: inherit; font-size: 12px; font-weight: 500; cursor: pointer; }
     #pd9-hub-sorted .pd9-hs-chip::after { content: "✕"; margin-left: 6px; font-size: 10px; opacity: .6; }
     #pd9-hub-sorted .pd9-hs-chip:hover::after { opacity: 1; }
-    #pd9-hub-sorted .pd9-hs-clear { border: 0; background: none; padding: 2px 4px; color: var(--accent); font: inherit; font-size: 12px; font-weight: 600; cursor: pointer; text-decoration: underline; text-underline-offset: 3px; }
+    #pd9-hub-sorted .pd9-hs-clear { border: 0; background: none; padding: 2px 4px; color: var(--accent); font: inherit; font-size: 12px; font-weight: 500; cursor: pointer; text-decoration: underline; text-underline-offset: 3px; }
     #pd9-hub-sorted .pd9-tag-menu {
       position: absolute; z-index: 5; width: 280px; max-height: 360px; display: flex; flex-direction: column; background: #fff; border-radius: 10px;
       box-shadow: 0 0 0 1px rgba(16, 24, 40, .1), 0 16px 36px -12px rgba(16, 24, 40, .35); font-size: 13px;
@@ -7816,7 +8172,7 @@
     #pd9-hub-sorted .pd9-tm-find { flex: 1; min-width: 0; padding: 5px 8px; border: 1px solid #d0d5dd; border-radius: 6px; font: inherit; font-size: 13px; }
     #pd9-hub-sorted .pd9-tm-find:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
     #pd9-hub-sorted .pd9-tm-mode { display: inline-flex; padding: 2px; background: #f2f4f7; border-radius: 7px; }
-    #pd9-hub-sorted .pd9-tm-mode button { border: 0; padding: 3px 9px; border-radius: 5px; background: none; color: var(--slate); font: inherit; font-size: 12px; font-weight: 600; cursor: pointer; }
+    #pd9-hub-sorted .pd9-tm-mode button { border: 0; padding: 3px 9px; border-radius: 5px; background: none; color: var(--slate); font: inherit; font-size: 12px; font-weight: 500; cursor: pointer; }
     #pd9-hub-sorted .pd9-tm-mode button[aria-checked="true"] { background: #fff; color: var(--ink); box-shadow: 0 1px 2px rgba(16, 24, 40, .12); }
     #pd9-hub-sorted .pd9-tm-list { overflow: auto; padding: 4px; }
     #pd9-hub-sorted .pd9-tm-row { display: flex; align-items: center; gap: 8px; padding: 5px 6px; border-radius: 6px; cursor: pointer; }
@@ -7825,81 +8181,31 @@
     #pd9-hub-sorted .pd9-tm-count { margin-left: auto; color: var(--slate); font-size: 12px; }
     #pd9-hub-sorted .pd9-tm-empty { margin: 10px; color: var(--slate); }
     #pd9-hub-sorted .pd9-tm-foot { display: flex; justify-content: flex-end; padding: 6px 8px; border-top: 1px solid var(--line); }
-    #pd9-hub-sorted .pd9-tm-clear { border: 0; background: none; color: var(--accent); font: inherit; font-size: 12px; font-weight: 600; cursor: pointer; }
-    #pd9-hub-sorted .pd9-tm-notbtn { border: 1px solid #d0d5dd; background: #fff; color: #667085; border-radius: 6px; padding: 1px 7px; font: inherit; font-size: 11px; font-weight: 700; cursor: pointer; }
+    #pd9-hub-sorted .pd9-tm-clear { border: 0; background: none; color: var(--accent); font: inherit; font-size: 12px; font-weight: 500; cursor: pointer; }
+    #pd9-hub-sorted .pd9-tm-notbtn { border: 1px solid #d0d5dd; background: #fff; color: #667085; border-radius: 6px; padding: 1px 7px; font: inherit; font-size: 12px; font-weight: 600; cursor: pointer; }
     #pd9-hub-sorted .pd9-tm-notbtn:hover { border-color: #b42318; color: #b42318; }
     #pd9-hub-sorted .pd9-tm-notbtn[aria-pressed="true"] { background: #b42318; border-color: #b42318; color: #fff; }
     #pd9-hub-sorted .pd9-tm-notbtn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
     #pd9-hub-sorted .pd9-tag-not { text-decoration: line-through; opacity: .7; }
     #pd9-hub-sorted .pd9-tm-count { margin-left: auto; }
     #pd9-hub-sorted .pd9-hs-chip-not { background: #fee4e2; color: #b42318; text-decoration: line-through; text-decoration-thickness: 1px; }
-    #pd9-hub-sorted .pd9-who { display: inline-flex; align-items: center; gap: 10px; max-width: 100%; vertical-align: middle; }
+    #pd9-hub-sorted .pd9-who { display: inline-flex; align-items: center; gap: 8px; max-width: 100%; vertical-align: middle; }
     #pd9-hub-sorted .pd9-who-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     #pd9-hub-sorted .pd9-av {
-      flex: none; display: grid; place-items: center; width: 28px; height: 28px; border-radius: 50%; overflow: hidden;
-      background: var(--pd9-av, #1f7a77); color: var(--t-color-object-text-light, #fff); font-size: 11px; font-weight: 700; letter-spacing: .02em;
+      flex: none; display: grid; place-items: center; width: 24px; height: 24px; border-radius: 50%; overflow: hidden;
+      background: var(--pd9-av, #1f7a77); color: var(--t-color-object-text-light, #fff); font-size: 10px; font-weight: 600; letter-spacing: .02em;
     }
     #pd9-hub-sorted .pd9-av img { width: 100%; height: 100%; object-fit: cover; }
     #pd9-hub-sorted .pd9-own-pending .pd9-av { opacity: 1; }
     @media (prefers-reduced-motion: reduce) { #pd9-hub-sorted *, #pd9-hub-sorted .pd9-skel-line { transition: none !important; animation: none !important; } }
-    .pd9-hub-toggle-plain { display: inline-flex; align-items: center; gap: 6px; margin: 0 0 8px; font-size: 13px; font-weight: 600; cursor: pointer; user-select: none; }
+    .pd9-hub-toggle-plain { display: inline-flex; align-items: center; gap: 6px; margin: 0 0 8px; font-size: 13px; font-weight: 500; cursor: pointer; user-select: none; }
     .pd9-hub-toggle-plain input { width: 16px; height: 16px; margin: 0; }
-    #pd9-hub-sorted td a { color: #2b7a78; text-decoration: none; }
-    #pd9-hub-sorted td a:hover { text-decoration: underline; }
     /* Project Hub: Next Event column */
     .ag-cell[col-id="pd9NextEvent"], .ag-cell[col-id="pd9NextTitle"] { display: flex; align-items: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     /* Window mode: case windows and the bar at the bottom */
-    .pd9-win {
-      position: fixed; z-index: 100010; display: flex; flex-direction: column; min-width: 360px; min-height: 240px;
-      background: #fff; border-radius: 10px; overflow: hidden;
-      box-shadow: 0 0 0 1px rgba(16, 24, 40, .12), 0 18px 40px -12px rgba(16, 24, 40, .35);
-    }
-    .pd9-win.pd9-win-focus { box-shadow: 0 0 0 1px rgba(31, 122, 119, .55), 0 24px 52px -14px rgba(16, 24, 40, .45); }
-    .pd9-win.pd9-win-min { display: none; }
-    .pd9-win.pd9-win-spare { left: -20000px !important; top: 0 !important; visibility: hidden; pointer-events: none; }
-    .pd9-win.pd9-win-max { left: 8px !important; top: 8px !important; right: 8px; bottom: 52px; width: auto !important; height: auto !important; }
-    .pd9-win-head { display: flex; align-items: center; gap: 2px; height: 36px; padding: 0 6px 0 14px; background: #f8f9fb; border-bottom: 1px solid #e9ecf1; cursor: move; user-select: none; touch-action: none; }
-    .pd9-win-focus .pd9-win-head { background: #eef6f6; }
-    .pd9-win-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; font-weight: 600; color: #1d2433; }
-    .pd9-win-btn { display: grid; place-items: center; width: 28px; height: 28px; border: 0; border-radius: 6px; background: none; color: #667085; cursor: pointer; }
-    .pd9-win-btn:hover { background: rgba(16, 24, 40, .07); color: #1d2433; }
-    .pd9-win-x:hover { background: #fee4e2; color: #b42318; }
-    .pd9-win-btn:focus-visible { outline: 2px solid #1f7a77; outline-offset: 1px; }
-    .pd9-win-body { position: relative; flex: 1; overflow: hidden; }
-    .pd9-win-body iframe { position: absolute; left: 0; top: 0; width: calc(100% / var(--pd9-z, 1)); height: calc(100% / var(--pd9-z, 1)); border: 0; background: #fff; transform: scale(var(--pd9-z, 1)); transform-origin: 0 0; }
-    .pd9-win-busy .pd9-win-body iframe { pointer-events: none; }
-    .pd9-win-busy, .pd9-win-busy * { user-select: none !important; }
-    .pd9-win-grip { position: absolute; right: 0; bottom: 0; width: 18px; height: 18px; cursor: nwse-resize;
-      background: linear-gradient(135deg, transparent 50%, #c9ced6 50%, #c9ced6 58%, transparent 58%, transparent 70%, #c9ced6 70%, #c9ced6 78%, transparent 78%); }
-    .pd9-win-max .pd9-win-grip { display: none; }
-    #pd9-taskbar {
-      position: fixed; left: 50%; bottom: 8px; transform: translateX(-50%); z-index: 2147483000; display: flex; gap: 6px; padding: 6px;
-      max-width: calc(100vw - 32px); overflow-x: auto; background: rgba(255, 255, 255, .92); backdrop-filter: blur(8px);
-      border-radius: 12px; box-shadow: 0 0 0 1px rgba(16, 24, 40, .1), 0 10px 30px -10px rgba(16, 24, 40, .4);
-    }
-    #pd9-taskbar[hidden] { display: none; }
-    .pd9-off-hub .pd9-win, .pd9-off-hub #pd9-taskbar { display: none !important; }
-    .pd9-task-grip { flex: none; width: 10px; margin: 2px 0 2px 2px; border-radius: 4px; cursor: grab; touch-action: none;
-      background: radial-gradient(circle, #98a2b3 1.2px, transparent 1.6px) 0 0 / 5px 5px; opacity: .7; }
-    .pd9-task-grip:hover { opacity: 1; }
-    #pd9-taskbar.pd9-task-dragging { cursor: grabbing; }
-    #pd9-taskbar.pd9-task-dragging .pd9-task-grip { cursor: grabbing; }
 
-    .pd9-task-home { flex: none; display: grid; place-items: center; width: 32px; height: 30px; border: 0; border-radius: 8px; background: transparent; color: #475467; cursor: pointer; }
-    .pd9-task-home:hover { background: rgba(16, 24, 40, .07); color: #1d2433; }
-    .pd9-task-sep { flex: none; width: 1px; margin: 4px 2px; background: #e4e7ec; }
     .pd9-task { flex: none; display: inline-flex; align-items: center; max-width: 260px; border-radius: 8px; color: #1d2433; }
     .pd9-task:hover { background: rgba(16, 24, 40, .06); }
-    .pd9-task.pd9-task-active { background: #e3f1f0; color: #155e5b; box-shadow: inset 0 -2px 0 #1f7a77; }
-    .pd9-task.pd9-task-min { color: #667085; }
-    .pd9-task-name { min-width: 0; padding: 6px 4px 6px 12px; border: 0; background: none; color: inherit; font: inherit; font-size: 12.5px; font-weight: 600;
-      white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: pointer; }
-    .pd9-task-min .pd9-task-name { font-weight: 500; }
-    .pd9-task-x { flex: none; display: grid; place-items: center; width: 22px; height: 22px; margin-right: 4px; border: 0; border-radius: 6px;
-      background: none; color: inherit; opacity: .45; cursor: pointer; }
-    .pd9-task:hover .pd9-task-x { opacity: .8; }
-    .pd9-task-x:hover { opacity: 1; background: #fee4e2; color: #b42318; }
-    .pd9-task-home:focus-visible, .pd9-task-name:focus-visible, .pd9-task-x:focus-visible { outline: 2px solid #1f7a77; outline-offset: 1px; }
     /* Selecting cases in the PD9 table */
     #pd9-hub-sorted .pd9-pick { padding: 0 0 0 10px !important; text-align: left; cursor: default; white-space: nowrap; }
     #pd9-hub-sorted .pd9-pin-btn { all: unset; display: inline-grid; place-items: center; width: 22px; height: 22px; margin-left: 2px; border-radius: 6px; vertical-align: middle; color: #98a2b3; cursor: pointer; opacity: 0; }
@@ -7912,27 +8218,44 @@
     #pd9-hub-sorted .pd9-pick input { width: 15px; height: 15px; margin: 0; accent-color: var(--accent); cursor: pointer; vertical-align: middle; }
     #pd9-hub-sorted tbody tr.pd9-picked { background: #e8f3f2 !important; }
     #pd9-hub-sorted .pd9-bulk-bar { display: inline-flex; align-items: center; gap: 8px; margin-left: auto; }
-    #pd9-hub-sorted .pd9-bulk-count { color: var(--ink); font-weight: 600; }
-    #pd9-hub-sorted .pd9-bulk-btn { border: 1px solid #d0d5dd; background: #fff; color: var(--ink); padding: 4px 12px; border-radius: 7px; font: inherit; font-size: 12.5px; font-weight: 600; cursor: pointer; }
+    #pd9-hub-sorted .pd9-bulk-count { color: var(--ink); font-weight: 500; }
+    #pd9-hub-sorted .pd9-bulk-btn { border: 1px solid #d0d5dd; background: #fff; color: var(--ink); padding: 4px 12px; border-radius: 7px; font: inherit; font-size: 12.5px; font-weight: 500; cursor: pointer; }
     #pd9-hub-sorted .pd9-bulk-btn:hover { background: #f5f9f9; }
+    #pd9-hub-sorted .pd9-d33-btn { margin-left: 12px; white-space: nowrap; }
+    #pd9-hub-sorted.pd9-hs-docked .pd9-d33-btn, #pd9-hub-sorted.pd9-hs-docked .pd9-hs-refresh, #pd9-hub-sorted.pd9-hs-docked .pd9-hs-os, #pd9-hub-sorted.pd9-hs-docked .pd9-hs-find { display: none; }
+    #pd9-hub-sorted .pd9-hs-find { display: inline-flex; align-items: center; gap: 6px; margin-left: 12px; padding: 0 8px; height: 26px; border: 1px solid #d0d5dd; border-radius: 7px; background: #fff; color: var(--slate); }
+    #pd9-hub-sorted .pd9-hs-find:focus-within { border-color: var(--accent); box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 20%, transparent); }
+    #pd9-hub-sorted .pd9-hs-find svg { width: 14px; height: 14px; flex: none; }
+    #pd9-hub-sorted .pd9-hs-find input { width: 230px; border: 0; outline: 0; background: transparent; color: var(--ink); font: inherit; font-size: 12.5px; padding: 0; }
+    html.pd9-dark #pd9-hub-sorted .pd9-hs-find { background: #1f242b; border-color: #343a44; }
+    #pd9-hub-sorted .pd9-hs-refresh { display: inline-grid; place-items: center; margin-left: 6px; padding: 0; width: 28px; height: 26px; }
+    #pd9-hub-sorted .pd9-hs-refresh:disabled { opacity: .6; cursor: default; }
+    #pd9-hub-sorted .pd9-hs-refresh.pd9-rf-spin svg { animation: pd9-rf-rot 1s linear infinite; }
+    @keyframes pd9-rf-rot { to { transform: rotate(360deg); } }
+    #pd9-hub-sorted .pd9-hs-os { display: inline-flex; align-items: center; gap: 5px; margin-left: 12px; white-space: nowrap; cursor: pointer; color: var(--ink); }
+    #pd9-hub-sorted .pd9-d33-btn.pd9-d33-on { background: #b42318; border-color: #b42318; color: #fff; }
+    #pd9-hub-sorted .pd9-d33 { display: inline-block; padding: 0 6px; border-radius: 9px; font-size: 11px; font-weight: 600; line-height: 18px; vertical-align: 1px; white-space: nowrap; }
+    #pd9-hub-sorted .pd9-d33-red { background: #fee4e2; color: #b42318; }
+    html.pd9-dark #pd9-hub-sorted .pd9-d33-red { background: #55160c; color: #fda29b; }
+    html.pd9-dark #pd9-hub-sorted .pd9-d33-btn.pd9-d33-on { background: #b42318; border-color: #b42318; color: #fff; }
     #pd9-hub-sorted .pd9-bulk-primary { background: var(--accent); border-color: var(--accent); color: #fff; }
     #pd9-hub-sorted .pd9-bulk-primary:hover { background: #18625f; }
-    #pd9-hub-sorted .pd9-bulk-link { border: 0; background: none; color: var(--accent); font: inherit; font-size: 12.5px; font-weight: 600; cursor: pointer; text-decoration: underline; text-underline-offset: 3px; }
+    #pd9-hub-sorted .pd9-bulk-link { border: 0; background: none; color: var(--accent); font: inherit; font-size: 12.5px; font-weight: 500; cursor: pointer; text-decoration: underline; text-underline-offset: 3px; }
     /* The multi-case note/task box, styled after Filevine's own */
     .pd9-bulk-modal { z-index: 100003 !important; }
     .pd9-bulk-modal .pd9-bulk-dialog { width: min(640px, 100%); }
     .pd9-bc-head { display: flex; align-items: center; gap: 12px; padding: 12px 16px; border-bottom: 1px solid var(--t-color-border, #e4e7ec); }
-    .pd9-bc-head h2 { flex: 1; margin: 0; font-size: 16px; font-weight: 600; }
+    .pd9-bc-head h2 { flex: 1; margin: 0; font-size: 16px; font-weight: 500; }
     .pd9-bc-types { display: inline-flex; gap: 2px; padding: 2px; background: var(--t-color-object-1-secondary, #f2f4f7); border-radius: 8px; }
     .pd9-bc-types button { display: grid; place-items: center; width: 34px; height: 30px; border: 0; border-radius: 6px; background: none; color: var(--t-color-text-secondary, #667085); cursor: pointer; }
     .pd9-bc-types button.pd9-on { background: var(--t-color-surface, #fff); color: #1f7a77; box-shadow: 0 1px 2px rgba(16, 24, 40, .14); }
     .pd9-bc-cases { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; padding: 10px 16px 0; max-height: 84px; overflow: auto; }
-    .pd9-bc-case { padding: 2px 8px; border-radius: 6px; background: #e8f3f2; color: #155e5b; font-size: 12px; font-weight: 600; white-space: nowrap; }
+    .pd9-bc-case { padding: 2px 8px; border-radius: 6px; background: #e8f3f2; color: #155e5b; font-size: 12px; font-weight: 500; white-space: nowrap; }
     .pd9-bc-form { display: flex; flex-direction: column; gap: 12px; padding: 12px 16px 4px; }
-    .pd9-bc-label { display: block; margin-bottom: 4px; font-size: 12px; font-weight: 600; color: var(--t-color-text-secondary, #475467); }
+    .pd9-bc-label { display: block; margin-bottom: 4px; font-size: 12px; font-weight: 500; color: var(--t-color-text-secondary, #475467); }
     .pd9-bc-tpls { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
     .pd9-bc-tpls .pd9-bc-label { display: inline; margin: 0 4px 0 0; }
-    .pd9-bc-tpl { border: 1px solid #d0d5dd; background: #fff; border-radius: 999px; padding: 3px 12px; font: inherit; font-size: 12.5px; font-weight: 600; color: #1d2433; cursor: pointer; }
+    .pd9-bc-tpl { border: 1px solid #d0d5dd; background: #fff; border-radius: 999px; padding: 3px 12px; font: inherit; font-size: 12.5px; font-weight: 500; color: #1d2433; cursor: pointer; }
     .pd9-bc-tpl:hover { border-color: #1f7a77; color: #1f7a77; }
     .pd9-bc-field { display: block; }
     .pd9-bc-field input[type=text], .pd9-bc-field input[type=date], .pd9-bc-field textarea {
@@ -7944,8 +8267,8 @@
     .pd9-bc-field input[type=date] { width: 200px; }
     .pd9-bc-tags { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; border: 1px solid var(--t-color-border, #d0d5dd); border-radius: 6px; padding: 5px 6px; }
     .pd9-bc-tags input { flex: 1; min-width: 160px; border: 0 !important; padding: 3px 4px !important; outline: none !important; }
-    .pd9-bc-chip { display: inline-flex; align-items: center; gap: 4px; padding: 2px 4px 2px 8px; border-radius: 6px; background: #e8f3f2; color: #155e5b; font-size: 12.5px; font-weight: 600; }
-    .pd9-bc-chip button { border: 0; background: none; color: inherit; opacity: .6; cursor: pointer; font-size: 11px; padding: 0 3px; }
+    .pd9-bc-chip { display: inline-flex; align-items: center; gap: 4px; padding: 2px 4px 2px 8px; border-radius: 6px; background: #e8f3f2; color: #155e5b; font-size: 12.5px; font-weight: 500; }
+    .pd9-bc-chip button { border: 0; background: none; color: inherit; opacity: .6; cursor: pointer; font-size: 12px; padding: 0 3px; }
     .pd9-bc-chip button:hover { opacity: 1; }
     .pd9-bc-task[hidden] { display: none; }
     .pd9-bc-note { margin: 6px 0 0; font-size: 12px; color: var(--t-color-text-secondary, #667085); }
@@ -7953,7 +8276,7 @@
     .pd9-bc-run[hidden] { display: none; }
     .pd9-bc-list { list-style: none; margin: 0; padding: 0; max-height: 320px; overflow: auto; }
     .pd9-bc-item { display: grid; grid-template-columns: 18px 1fr; column-gap: 8px; padding: 7px 4px; border-bottom: 1px solid #eef0f3; font-size: 13px; }
-    .pd9-bc-item a { color: #1f7a77; font-weight: 600; text-decoration: none; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .pd9-bc-item a { color: #1f7a77; font-weight: 500; text-decoration: none; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .pd9-bc-msg { grid-column: 2; font-size: 12px; color: #667085; }
     .pd9-bc-state { grid-row: span 2; width: 14px; height: 14px; margin-top: 2px; border-radius: 50%; border: 2px solid #d0d5dd; box-sizing: border-box; }
     .pd9-busy .pd9-bc-state { border-color: #c9ced6; border-top-color: #1f7a77; animation: pd9spin .8s linear infinite; }
@@ -7987,18 +8310,18 @@
     #pd9-switch .pd9-sw-spin { width: 16px; height: 16px; border-radius: 50%; border: 2px solid #d0d5dd; border-top-color: #1f7a77; animation: pd9spin .8s linear infinite; }
     #pd9-switch .pd9-sw-spin[hidden] { display: none; }
     #pd9-switch .pd9-sw-list { overflow: auto; padding: 6px; }
-    #pd9-switch .pd9-sw-group { padding: 8px 12px 4px; font-size: 11.5px; font-weight: 600; color: #667085; }
+    #pd9-switch .pd9-sw-group { padding: 8px 12px 4px; font-size: 12px; font-weight: 500; color: #667085; }
     #pd9-switch .pd9-sw-row { display: grid; grid-template-columns: 170px 1fr auto; align-items: center; gap: 12px; padding: 9px 12px; border-radius: 9px; cursor: pointer; }
     #pd9-switch .pd9-sw-sel { background: #1f7a77; color: #fff; }
-    #pd9-switch .pd9-sw-case { font-weight: 600; color: #1f7a77; white-space: nowrap; }
+    #pd9-switch .pd9-sw-case { font-weight: 500; color: #1f7a77; white-space: nowrap; }
     #pd9-switch .pd9-sw-sel .pd9-sw-case { color: #fff; }
     #pd9-switch .pd9-sw-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14.5px; }
     #pd9-switch .pd9-sw-next { font-size: 12px; color: #667085; white-space: nowrap; }
     #pd9-switch .pd9-sw-sel .pd9-sw-next { color: rgba(255, 255, 255, .85); }
-    #pd9-switch .pd9-sw-here .pd9-sw-next { font-weight: 600; }
+    #pd9-switch .pd9-sw-here .pd9-sw-next { font-weight: 500; }
     #pd9-switch .pd9-sw-empty { padding: 18px 14px; color: #667085; font-size: 14px; }
-    #pd9-switch .pd9-sw-foot { display: flex; gap: 16px; padding: 8px 16px; border-top: 1px solid rgba(16, 24, 40, .08); font-size: 11.5px; color: #667085; }
-    #pd9-switch kbd, .pd9-kbd { font: inherit; font-size: 11px; padding: 1px 5px; margin-right: 3px; border-radius: 4px; background: rgba(16, 24, 40, .07); box-shadow: inset 0 -1px 0 rgba(16, 24, 40, .15); }
+    #pd9-switch .pd9-sw-foot { display: flex; gap: 16px; padding: 8px 16px; border-top: 1px solid rgba(16, 24, 40, .08); font-size: 12px; color: #667085; }
+    #pd9-switch kbd, .pd9-kbd { font: inherit; font-size: 12px; padding: 1px 5px; margin-right: 3px; border-radius: 4px; background: rgba(16, 24, 40, .07); box-shadow: inset 0 -1px 0 rgba(16, 24, 40, .15); }
     .pd9-head-btn .pd9-kbd { margin-left: 6px; background: rgba(255, 255, 255, .18); box-shadow: none; }
     @media (prefers-reduced-motion: reduce) { #pd9-switch, #pd9-switch .pd9-sw-panel { animation: none; } }
     /* Activity tab: show each note in full instead of cutting it off at 3 lines */
@@ -8018,7 +8341,7 @@
     #pd9-docprev.pd9-dp-resizing iframe { pointer-events: none; }
     #pd9-docprev iframe:not(.pd9-dp-on) { visibility: hidden; }
     #pd9-docprev .pd9-dp-head { display: flex; align-items: center; gap: 4px; height: 44px; padding: 0 8px; border-bottom: 1px solid #e9ecf1; background: #f8f9fb; }
-    #pd9-docprev .pd9-dp-title { flex: 1; min-width: 0; margin-left: 6px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13.5px; font-weight: 600; color: #1d2433; }
+    #pd9-docprev .pd9-dp-title { flex: 1; min-width: 0; margin-left: 6px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13.5px; font-weight: 500; color: #1d2433; }
     #pd9-docprev .pd9-dp-count { font-size: 12px; color: #667085; white-space: nowrap; margin-right: 4px; font-variant-numeric: tabular-nums; }
     #pd9-docprev .pd9-dp-btn { all: unset; display: grid; place-items: center; width: 30px; height: 30px; border-radius: 6px; color: #475467; cursor: pointer; }
     #pd9-docprev .pd9-dp-btn:hover:not(:disabled) { background: rgba(16, 24, 40, .07); color: #1d2433; }
@@ -8029,17 +8352,17 @@
     #pd9-docprev iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; background: #fff; }
     #pd9-docprev .pd9-dp-msg { position: absolute; inset: 0; display: grid; place-content: center; justify-items: center; gap: 10px; padding: 24px; background: #fff; text-align: center; color: #475467; font-size: 14px; }
     #pd9-docprev .pd9-dp-msg[hidden] { display: none; }
-    #pd9-docprev .pd9-dp-msg button { font: inherit; font-size: 13px; font-weight: 600; padding: 8px 14px; border-radius: 8px; border: 0; background: #1f7a77; color: #fff; cursor: pointer; }
+    #pd9-docprev .pd9-dp-msg button { font: inherit; font-size: 13px; font-weight: 500; padding: 8px 14px; border-radius: 8px; border: 0; background: #1f7a77; color: #fff; cursor: pointer; }
     /* Tag editor in the PD9 table */
     #pd9-hub-sorted .pd9-tag-add { all: unset; display: inline-grid; place-items: center; width: 22px; height: 22px; margin: 2px 0 2px 2px; border-radius: 6px; border: 1px dashed #c9ced6; color: #667085; font-size: 15px; line-height: 1; cursor: pointer; opacity: 0; vertical-align: middle; }
     #pd9-hub-sorted tr:hover .pd9-tag-add, #pd9-hub-sorted .pd9-tag-add:focus-visible { opacity: 1; }
     #pd9-hub-sorted .pd9-tag-add:hover { border-style: solid; border-color: #1f7a77; color: #1f7a77; background: #eef6f6; }
     #pd9-hub-sorted .pd9-tag-add:focus-visible { outline: 2px solid #1f7a77; outline-offset: 1px; }
     .pd9-tag-edit { position: fixed; z-index: 100005; width: 290px; padding: 10px; background: #fff; color: #1d2433; border-radius: 10px; box-shadow: 0 0 0 1px rgba(16, 24, 40, .1), 0 16px 40px -12px rgba(16, 24, 40, .4); font: 13px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
-    .pd9-tag-edit .pd9-te-title { font-weight: 600; margin: 0 2px 8px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .pd9-tag-edit .pd9-te-title { font-weight: 500; margin: 0 2px 8px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .pd9-tag-edit .pd9-te-on { display: flex; flex-wrap: wrap; gap: 4px; margin: 0 0 8px; }
     .pd9-tag-edit .pd9-te-none { color: #98a2b3; font-size: 12px; margin-left: 2px; }
-    .pd9-tag-edit .pd9-te-chip { display: inline-flex; align-items: center; gap: 2px; padding: 2px 4px 2px 8px; border-radius: 999px; font-size: 12px; font-weight: 600; color: var(--pd9-tag, #1f7a77); background: color-mix(in srgb, var(--pd9-tag, #1f7a77) 12%, #fff); }
+    .pd9-tag-edit .pd9-te-chip { display: inline-flex; align-items: center; gap: 2px; padding: 2px 4px 2px 8px; border-radius: 999px; font-size: 12px; font-weight: 500; color: var(--pd9-tag, #1f7a77); background: color-mix(in srgb, var(--pd9-tag, #1f7a77) 12%, #fff); }
     .pd9-tag-edit .pd9-te-chip:not(:has(button)) { padding-right: 8px; }
     .pd9-tag-edit .pd9-te-chip button { all: unset; display: grid; place-items: center; width: 16px; height: 16px; border-radius: 50%; font-size: 13px; line-height: 1; cursor: pointer; }
     .pd9-tag-edit .pd9-te-chip button:hover { background: rgba(16, 24, 40, .12); }
@@ -8156,9 +8479,8 @@
     html.pd9-season .pd9-wn-ok { background: var(--ss-accent) !important; border-color: var(--ss-accent) !important; color: var(--ss-on-accent) !important; }
     html.pd9-season .pd9-overlay .pd9-primary:hover, html.pd9-season .pd9-wn-ok:hover { background: var(--ss-accent-hover) !important; border-color: var(--ss-accent-hover) !important; }
     html.pd9-season .pd9-dialog, html.pd9-season #pd9-case, html.pd9-season #pd9-whatsnew { background: var(--ss-bg-raised); color: var(--ss-text); border-color: var(--ss-border); }
-    html.pd9-season #pd9-hub-sorted { --ink: var(--ss-text); --slate: var(--ss-text-secondary); --line: var(--ss-border); --head: var(--ss-bg-page); --accent: var(--ss-accent); --soon: var(--ss-soon); background: var(--ss-bg-surface); }
+    html.pd9-season #pd9-hub-sorted { --ink: var(--ss-text); --slate: var(--ss-text-secondary); --line: var(--ss-border); --head: var(--ss-bg-page); --accent: var(--ss-accent); --soon: var(--ss-soon); --col-line: color-mix(in srgb, var(--ss-border) 60%, var(--ss-bg-surface)); --head: var(--ss-bg-surface); --hover: var(--ss-bg-hover); --chip: var(--ss-bg-hover); background: var(--ss-bg-surface); }
     html.pd9-season #pd9-hub-sorted td a { color: var(--ss-accent); }
-    html.pd9-season #pd9-hub-sorted tbody tr:hover td { background: var(--ss-bg-hover); }
     html.pd9-season #pd9-hub-sorted, html.pd9-season #pd9-casepanel, html.pd9-season .pd9-leftpane { border-color: var(--ss-border); }
     html.pd9-season .pd9-cp-head { background: var(--ss-bg-page); border-color: var(--ss-border); color: var(--ss-text); }
     html.pd9-season .pd9-cp-btn { color: var(--ss-text-secondary); }
@@ -8261,9 +8583,7 @@
     html.pd9-dark .modal-backdrop.in { opacity: .6 !important; }
     html.pd9-dark img:not([src*=".svg"]) { filter: brightness(.92); }
     /* The Improver's own windows and tables */
-    html.pd9-dark #pd9-hub-sorted { --ink: #e6e8ec; --slate: #a3aab6; --line: #232830; --head: #191c22; --accent: #2fbfae; --soon: #ff8a4c; background: #15181d; }
-    html.pd9-dark #pd9-hub-sorted tbody tr:nth-child(even) { background: #171a20; }
-    html.pd9-dark #pd9-hub-sorted tbody tr:hover { background: #1c2128; }
+    html.pd9-dark #pd9-hub-sorted { --ink: #e6e8ec; --slate: #a3aab6; --line: #232830; --col-line: #1d2128; --head: #15181d; --hover: #1c2128; --chip: #1f242b; --accent: #2fbfae; --soon: #ff8a4c; background: #15181d; }
     html.pd9-dark #pd9-hub-sorted tbody tr.pd9-picked { background: #17302d !important; }
     html.pd9-dark .pd9-charges-modal .pd9-charges-table tr:nth-child(even) td { background: rgba(255, 255, 255, .03); }
     html.pd9-dark #pd9-hub-sorted tr.pd9-pinned-row td { background: #14211f; }
@@ -8280,14 +8600,6 @@
     html.pd9-dark .pd9-overlay .pd9-primary, html.pd9-dark .pd9-panel .pd9-primary, html.pd9-dark #pd9-case .pd9-primary, html.pd9-dark #pd9-adv .pd9-primary { background: #1f9385; border-color: #1f9385; }
     html.pd9-dark .pd9-overlay .pd9-dialog, html.pd9-dark #pd9-case, html.pd9-dark #pd9-adv, html.pd9-dark .pd9-panel { box-shadow: 0 0 0 1px #2c323c, 0 24px 60px -20px rgba(0, 0, 0, .8); }
     html.pd9-dark .pd9-zoomopt select { background: #1b1f25; color: #e6e8ec; border-color: #343a44; }
-    html.pd9-dark .pd9-win { background: #15181d; box-shadow: 0 0 0 1px #2c323c, 0 24px 60px -20px rgba(0, 0, 0, .8); }
-    html.pd9-dark .pd9-win-head { background: #191c22; border-bottom-color: #262b33; }
-    html.pd9-dark .pd9-win-focus .pd9-win-head { background: #17302d; }
-    html.pd9-dark .pd9-win-title { color: #e6e8ec; }
-    html.pd9-dark .pd9-win-btn { color: #a3aab6; }
-    html.pd9-dark .pd9-win-btn:hover { background: rgba(255, 255, 255, .08); color: #fff; }
-    html.pd9-dark .pd9-win-body iframe { background: #15181d; }
-    html.pd9-dark #pd9-taskbar { background: rgba(21, 24, 29, .88); box-shadow: 0 0 0 1px #2c323c, 0 12px 30px -10px rgba(0, 0, 0, .7); }
     html.pd9-dark .pd9-task { color: #e6e8ec; }
     html.pd9-dark #pd9-switch .pd9-sw-panel { background: rgba(24, 27, 33, .94); color: #e6e8ec; box-shadow: 0 0 0 1px #2c323c, 0 30px 80px -20px rgba(0, 0, 0, .85); }
     html.pd9-dark #pd9-switch .pd9-sw-sel { background: #1f9385; }
@@ -8312,10 +8624,10 @@
       background: var(--t-color-background-secondary, #f6f7f9); border: 1px solid var(--t-color-border-primary, #e4e7ec); font-size: 13px; color: var(--t-color-text-primary, #1d2433); }
     #pd9-triage button { font: inherit; cursor: pointer; color: inherit; }
     .pd9-tri-group { display: flex; align-items: center; gap: 8px; }
-    .pd9-tri-label { color: var(--t-color-text-secondary, #667085); font-weight: 600; }
+    .pd9-tri-label { color: var(--t-color-text-secondary, #667085); font-weight: 500; }
     .pd9-tri-seg { display: inline-flex; padding: 2px; border-radius: 8px; background: rgba(16, 24, 40, .06); }
     .pd9-tri-seg button { border: 0; background: none; padding: 5px 12px; border-radius: 6px; font-weight: 500; }
-    .pd9-tri-seg button[aria-pressed="true"] { background: var(--t-color-background-primary, #fff); font-weight: 600; box-shadow: 0 1px 2px rgba(16, 24, 40, .15); }
+    .pd9-tri-seg button[aria-pressed="true"] { background: var(--t-color-background-primary, #fff); font-weight: 500; box-shadow: 0 1px 2px rgba(16, 24, 40, .15); }
     .pd9-tri-dyn { display: contents; }
     .pd9-tri-find { display: flex; align-items: center; gap: 8px; }
     .pd9-tri-find input { width: 200px; height: 30px; padding: 0 10px; border-radius: 8px; border: 1px solid var(--t-color-border-secondary, #d0d5dd); background: var(--t-color-background-primary, #fff); color: inherit; font: inherit; }
@@ -8325,12 +8637,12 @@
     html.pd9-dark .pd9-tri-none { color: #f97066; }
     .pd9-tri-chips { display: flex; flex-wrap: wrap; gap: 6px; }
     .pd9-tri-chips button { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 999px; border: 1px solid var(--t-color-border-secondary, #d0d5dd); background: var(--t-color-background-primary, #fff); }
-    .pd9-tri-chips button[aria-pressed="true"] { border-color: #1f7a77; background: #e7f3f2; color: #155e5b; font-weight: 600; }
+    .pd9-tri-chips button[aria-pressed="true"] { border-color: #1f7a77; background: #e7f3f2; color: #155e5b; font-weight: 500; }
     .pd9-tri-n { color: var(--t-color-text-secondary, #667085); font-variant-numeric: tabular-nums; font-weight: 500; }
     .pd9-tri-grow { flex: 1; }
-    .pd9-tri-select, .pd9-tri-bulk button { border: 1px solid var(--t-color-border-secondary, #d0d5dd); background: var(--t-color-background-primary, #fff); padding: 5px 12px; border-radius: 8px; font-weight: 600; }
+    .pd9-tri-select, .pd9-tri-bulk button { border: 1px solid var(--t-color-border-secondary, #d0d5dd); background: var(--t-color-background-primary, #fff); padding: 5px 12px; border-radius: 8px; font-weight: 500; }
     .pd9-tri-bulk { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
-    .pd9-tri-count { margin: 0 4px; font-weight: 600; color: #155e5b; }
+    .pd9-tri-count { margin: 0 4px; font-weight: 500; color: #155e5b; }
     .pd9-tri-flagbtn { display: inline-flex; align-items: center; gap: 6px; }
     #pd9-triage .pd9-tri-done { background: #1f7a77; border-color: #1f7a77; color: #fff; }
     #pd9-triage button:focus-visible { outline: 2px solid #1f7a77; outline-offset: 1px; }
@@ -8362,7 +8674,7 @@
     #pd9-depo button { font: inherit; cursor: pointer; }
     #pd9-depo [hidden] { display: none !important; }
     .pd9-depo-head { display: flex; align-items: center; gap: 8px; padding: 10px 10px 10px 14px; border-bottom: 1px solid #232831; }
-    .pd9-depo-title { font-size: 13px; font-weight: 600; letter-spacing: .01em; }
+    .pd9-depo-title { font-size: 13px; font-weight: 500; letter-spacing: .01em; }
     .pd9-depo-grow { flex: 1; }
     .pd9-depo-dot { width: 9px; height: 9px; border-radius: 50%; background: #4b5563; flex: none; }
     #pd9-depo[data-state=recording] .pd9-depo-dot { background: #f04438; box-shadow: 0 0 0 0 rgba(240,68,56,.6); animation: pd9-depo-pulse 1.6s infinite; }
@@ -8375,12 +8687,12 @@
     .pd9-depo-mini-meter, .pd9-depo-mini-time { display: none; }
     .pd9-depo-body { padding: 12px 14px 14px; display: flex; flex-direction: column; gap: 10px; }
     .pd9-depo-field { display: flex; flex-direction: column; gap: 4px; }
-    .pd9-depo-field > span { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: #8b95a3; }
+    .pd9-depo-field > span { font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: #8b95a3; }
     .pd9-depo-field input, .pd9-depo-field select { height: 32px; padding: 0 10px; border-radius: 8px; border: 1px solid #2f3742; background: #0e1014; color: #e6e9ee; font: inherit; min-width: 0; }
     .pd9-depo-field input:focus, .pd9-depo-field select:focus { outline: none; border-color: #2fbfae; box-shadow: 0 0 0 3px rgba(47,191,174,.2); }
     .pd9-depo-field select:disabled { opacity: .6; }
-    .pd9-depo-saveas { font-size: 11.5px; color: #8b95a3; margin-top: -4px; overflow-wrap: anywhere; }
-    .pd9-depo-file { color: #c8ced8; font-family: ui-monospace, Consolas, monospace; font-size: 11px; }
+    .pd9-depo-saveas { font-size: 12px; color: #8b95a3; margin-top: -4px; overflow-wrap: anywhere; }
+    .pd9-depo-file { color: #c8ced8; font-family: ui-monospace, Consolas, monospace; font-size: 12px; }
     .pd9-depo-wave { display: block; width: 100%; height: 64px; background: #0e1014; border-radius: 8px; }
     .pd9-depo-meter { position: relative; height: 8px; border-radius: 4px; background: #232831; }
     .pd9-depo-fill { position: absolute; inset: 0 auto 0 0; width: 0; overflow: hidden; border-radius: 4px; transition: width 60ms linear; }
@@ -8396,10 +8708,10 @@
     .pd9-depo-btns { display: flex; flex-wrap: wrap; gap: 8px; }
     .pd9-depo-btns button { height: 34px; padding: 0 14px; border-radius: 9px; border: 1px solid #2f3742; background: #1d2229; color: #e6e9ee; }
     .pd9-depo-btns button:hover { background: #262c35; }
-    .pd9-depo-btns .pd9-depo-rec { display: inline-flex; align-items: center; gap: 8px; background: #d92d20; border-color: #d92d20; color: #fff; font-weight: 600; }
+    .pd9-depo-btns .pd9-depo-rec { display: inline-flex; align-items: center; gap: 8px; background: #d92d20; border-color: #d92d20; color: #fff; font-weight: 500; }
     .pd9-depo-btns .pd9-depo-rec:hover { background: #b42318; }
     .pd9-depo-recdot { width: 9px; height: 9px; border-radius: 50%; background: #fff; }
-    .pd9-depo-btns .pd9-depo-stop { background: #e6e9ee; border-color: #e6e9ee; color: #14171c; font-weight: 600; }
+    .pd9-depo-btns .pd9-depo-stop { background: #e6e9ee; border-color: #e6e9ee; color: #14171c; font-weight: 500; }
     .pd9-depo-btns .pd9-depo-stop:hover { background: #fff; }
     .pd9-depo-recover { padding: 10px 12px; border-radius: 10px; background: #2a1f0c; border: 1px solid #5c4413; color: #fde7b0; display: flex; flex-direction: column; gap: 6px; }
     .pd9-depo-recover[hidden] { display: none; }
@@ -8425,7 +8737,7 @@
     .pd9-ff-clear:hover { background: rgba(16,24,40,.07); color: #1d2433; }
     .pd9-ff-count { font-size: 12px; color: #667085; }
     .pd9-ff-count[data-none="true"] { color: #b42318; }
-    .pd9-ff-more { height: 28px; padding: 0 10px; border-radius: 7px; border: 1px solid var(--t-color-border-secondary, #d0d5dd); background: var(--t-color-background-primary, #fff); color: #1f7a77; font: inherit; font-size: 12px; font-weight: 600; cursor: pointer; }
+    .pd9-ff-more { height: 28px; padding: 0 10px; border-radius: 7px; border: 1px solid var(--t-color-border-secondary, #d0d5dd); background: var(--t-color-background-primary, #fff); color: #1f7a77; font: inherit; font-size: 12px; font-weight: 500; cursor: pointer; }
     .pd9-ff-more:hover { background: #e7f3f2; }
     li.activity-list-item.pd9-ff-hide, .activity-item-group.pd9-ff-hide-group { display: none !important; }
     ::highlight(pd9-ff) { background-color: #fde68a; color: #1d2433; }
@@ -8435,7 +8747,7 @@
     html.pd9-dark .pd9-ff-count[data-none="true"] { color: #f97066; }
     html.pd9-dark ::highlight(pd9-ff) { background-color: #8a6d12; color: #fff; }
     /* ---------- Intake / Request helper buttons ---------- */
-    .pd9-field-btn { margin-left: 8px; padding: 1px 8px; height: 22px; border-radius: 6px; border: 1px solid var(--t-color-border, #c9ced6); background: var(--t-color-background-primary, #fff); color: #1f7a77; font: inherit; font-size: 12px; font-weight: 600; cursor: pointer; align-self: center; white-space: nowrap; }
+    .pd9-field-btn { margin-left: 8px; padding: 1px 8px; height: 22px; border-radius: 6px; border: 1px solid var(--t-color-border, #c9ced6); background: var(--t-color-background-primary, #fff); color: #1f7a77; font: inherit; font-size: 12px; font-weight: 500; cursor: pointer; align-self: center; white-space: nowrap; }
     .pd9-field-btn:hover { background: #e7f3f2; border-color: #1f7a77; }
     html.pd9-dark .pd9-field-btn { background: #1b1f24; border-color: #3a414b; color: #5fd4c4; }
     html.pd9-dark .pd9-field-btn:hover { background: #17302d; }
@@ -8448,18 +8760,31 @@
     #pd9-hub-sorted tbody tr.pd9-row-open td:first-child { box-shadow: inset 3px 0 0 var(--accent); }
     #pd9-hub-sorted.pd9-hs-docking { position: fixed; z-index: 9000; left: var(--pd9-from-l); top: var(--pd9-from-t); width: var(--pd9-from-w); height: var(--pd9-from-h); inset: auto;
       transition: left ${SIDE_MS}ms ${SIDE_EASE}, top ${SIDE_MS}ms ${SIDE_EASE}, width ${SIDE_MS}ms ${SIDE_EASE}, height ${SIDE_MS}ms ${SIDE_EASE}, border-radius ${SIDE_MS}ms; }
+    /* Stac view, one copy: Filevine slides over to the right of the table. The table
+       sits under Filevine's header, menus and dialogs (so they open over it). */
+    html.pd9-stac-one .crops-app-container { margin-left: var(--pd9-cp-list, 25vw) !important; width: auto !important; }
+    html.pd9-stac-one #pd9-hub-sorted.pd9-hs-docked { z-index: 950; }
+    html.pd9-stac-one .pd9-leftpane { z-index: 951; }
+    #pd9-hub-sorted.pd9-hs-parked { display: none !important; }
+    #pd9-stac-grip { display: none; }
+    html.pd9-stac-one #pd9-stac-grip { display: block; position: fixed; z-index: 952; top: var(--pd9-cp-top, 55px); bottom: 0; left: calc(var(--pd9-cp-list, 25vw) - 4px); width: 8px; cursor: col-resize; }
+    html.pd9-stac-one #pd9-stac-grip:hover, html.pd9-cp-resizing #pd9-stac-grip { background: color-mix(in srgb, var(--accent, #1f7a77) 35%, transparent); }
     #pd9-hub-sorted.pd9-hs-docked { position: fixed; z-index: 9000; inset: auto; left: 0; top: var(--pd9-cp-top, 55px); width: var(--pd9-cp-list, 33vw); height: calc(100vh - var(--pd9-cp-top, 55px)); border-radius: 0; border-width: 0 1px 0 0; }
     html.pd9-cp-open, html.pd9-cp-open body { overflow: hidden !important; }
     #pd9-casepanel { position: fixed; z-index: 9001; top: var(--pd9-cp-top, 55px); bottom: 0; right: 0; left: var(--pd9-cp-list, 33vw); margin: 0; display: flex; flex-direction: column;
       background: var(--t-color-background-primary, #fff); box-shadow: -24px 0 48px -24px rgba(16, 24, 40, .35), -1px 0 0 rgba(16, 24, 40, .08);
-      transform: translateX(calc(100% + 40px)); pointer-events: none; transition: transform ${SIDE_MS}ms ${SIDE_EASE}; will-change: transform; }
-    #pd9-casepanel.pd9-cp-show { transform: none; pointer-events: auto; }
+      /* Hidden = see-through and a little to the right, but still on screen. Off-screen
+         frames get slowed down by the browser, so a preloaded case stays on screen
+         (invisible, not clickable) and is ready the moment you click. */
+      opacity: 0; transform: translateX(56px); pointer-events: none;
+      transition: transform ${SIDE_MS}ms ${SIDE_EASE}, opacity 200ms ease; will-change: transform, opacity; }
+    #pd9-casepanel.pd9-cp-show { opacity: 1; transform: none; pointer-events: auto; }
     html.pd9-cp-resizing #pd9-casepanel, html.pd9-cp-resizing #pd9-hub-sorted { transition: none !important; }
     html.pd9-cp-resizing iframe { pointer-events: none; }
     .pd9-cp-edge { position: absolute; left: -4px; top: 0; bottom: 0; width: 8px; cursor: ew-resize; z-index: 2; }
     .pd9-cp-edge:hover { background: rgba(31, 122, 119, .25); }
     .pd9-cp-head { flex: none; display: flex; align-items: center; gap: 4px; height: 40px; padding: 0 8px 0 16px; border-bottom: 1px solid #e9ecf1; background: #f8f9fb; }
-    .pd9-cp-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13.5px; font-weight: 600; color: #1d2433; }
+    .pd9-cp-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13.5px; font-weight: 500; color: #1d2433; }
     .pd9-cp-btn { all: unset; display: grid; place-items: center; width: 30px; height: 30px; border-radius: 6px; color: #475467; cursor: pointer; }
     .pd9-cp-btn:hover { background: rgba(16, 24, 40, .07); color: #1d2433; }
     .pd9-cp-x:hover { background: #fee4e2; color: #b42318; }
@@ -8476,10 +8801,10 @@
     html.pd9-dark .activity-item-component.pd9-feed-picked { background: #16302e !important; }
     #pd9-feedbar { position: fixed; z-index: 9500; left: 50%; bottom: 20px; transform: translateX(-50%); display: flex; align-items: center; gap: 8px; padding: 8px 10px 8px 16px; border-radius: 12px;
       background: #14171c; color: #e6e9ee; font: 13px/1.2 system-ui, 'Segoe UI', sans-serif; box-shadow: 0 12px 32px rgba(0, 0, 0, .3); animation: pd9-wn-in .18s ease-out; }
-    #pd9-feedbar .pd9-fb-count { font-weight: 600; margin-right: 4px; white-space: nowrap; }
+    #pd9-feedbar .pd9-fb-count { font-weight: 500; margin-right: 4px; white-space: nowrap; }
     #pd9-feedbar button { height: 30px; padding: 0 12px; border: 0; border-radius: 8px; background: #262b33; color: inherit; font: inherit; cursor: pointer; white-space: nowrap; }
     #pd9-feedbar button:hover { background: #313741; }
-    #pd9-feedbar .pd9-fb-got { display: inline-flex; align-items: center; gap: 6px; background: #2fbfae; color: #06201d; font-weight: 600; }
+    #pd9-feedbar .pd9-fb-got { display: inline-flex; align-items: center; gap: 6px; background: #2fbfae; color: #06201d; font-weight: 500; }
     #pd9-feedbar .pd9-fb-got:hover { background: #4fd3c3; }
     #pd9-feedbar button:disabled { opacity: .6; cursor: progress; }
     .pd9-folders-btn:disabled { opacity: .7; cursor: progress; }
@@ -8506,12 +8831,12 @@
     #pd9-hub-sorted.pd9-hs-docked.pd9-sf-on .pd9-hs-wrap { display: none; }
     #pd9-hub-sorted.pd9-hs-docked.pd9-sf-on #pd9-stac-find { flex: 1; min-height: 0; display: flex; flex-direction: column; border-bottom: 0; }
     #pd9-hub-sorted.pd9-hs-docked.pd9-sf-on #pd9-stac-find .pd9-case-results { flex: 1; min-height: 0; max-height: none; }
-    #pd9-stac-find .pd9-case-status { display: flex; align-items: center; gap: 8px; font-weight: 600; margin-bottom: 4px; }
+    #pd9-stac-find .pd9-case-status { display: flex; align-items: center; gap: 8px; font-weight: 500; margin-bottom: 4px; }
     #pd9-stac-find .pd9-spin { width: 14px; height: 14px; border-radius: 50%; border: 2px solid #c9ced6; border-top-color: #1f2933; animation: pd9spin .8s linear infinite; }
     #pd9-stac-find .pd9-case-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 1px; }
     #pd9-stac-find .pd9-case-list a { display: flex; flex-direction: column; gap: 2px; padding: 6px 8px; border-radius: 6px; color: inherit; text-decoration: none; }
     #pd9-stac-find .pd9-case-list a:hover, #pd9-stac-find .pd9-case-list a:focus-visible { background: var(--t-color-object-1-secondary, #eef2f7); outline: none; }
-    #pd9-stac-find .pd9-case-title { font-weight: 600; color: #2b7a78; }
+    #pd9-stac-find .pd9-case-title { font-weight: 500; color: #2b7a78; }
     #pd9-stac-find .pd9-case-details { font-size: 12px; opacity: .75; }
     #pd9-stac-find .pd9-case-note { margin-top: 6px; font-size: 12px; opacity: .75; }
     html.pd9-dark #pd9-stac-find .pd9-sf-row { background: #1b1f26; border-color: #2c323c; }
@@ -8531,7 +8856,7 @@
     @keyframes pd9-wn-in { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
     .pd9-wn-head { display: flex; align-items: center; gap: 8px; }
     .pd9-wn-head b { font-size: 13px; }
-    .pd9-wn-ver { font-size: 11px; color: #667085; }
+    .pd9-wn-ver { font-size: 12px; color: #667085; }
     .pd9-wn-x { margin-left: auto; width: 24px; height: 24px; border: 0; border-radius: 6px; background: none; color: #667085; font-size: 16px; line-height: 1; cursor: pointer; }
     .pd9-wn-x:hover { background: #f2f4f7; color: #1d2433; }
     #pd9-whatsnew ul { margin: 8px 0 0; padding-left: 18px; }
@@ -8539,7 +8864,7 @@
     #pd9-whatsnew li.pd9-wn-top { list-style: none; margin: 0 0 8px -18px; padding: 8px 10px; border-radius: 8px; background: #e7f5f3; border-left: 3px solid #2b7a78; }
     html.pd9-dark #pd9-whatsnew li.pd9-wn-top { background: #16302e; }
     .pd9-wn-foot { display: flex; justify-content: flex-end; margin-top: 4px; }
-    .pd9-wn-ok { height: 28px; padding: 0 12px; border-radius: 7px; border: 1px solid #1f7a77; background: #1f7a77; color: #fff; font: inherit; font-weight: 600; cursor: pointer; }
+    .pd9-wn-ok { height: 28px; padding: 0 12px; border-radius: 7px; border: 1px solid #1f7a77; background: #1f7a77; color: #fff; font: inherit; font-weight: 500; cursor: pointer; }
     .pd9-wn-ok:hover { background: #155e5b; }
     html.pd9-dark #pd9-whatsnew { background: #1b1f24; color: #e6e9ee; border-color: #2f3742; box-shadow: 0 12px 32px -12px rgba(0,0,0,.7); }
     html.pd9-dark .pd9-wn-ver, html.pd9-dark .pd9-wn-x { color: #8b95a3; }
@@ -8550,13 +8875,30 @@
       background: #1f2933; color: #fff; padding: 8px 14px; border-radius: 6px;
       font-size: 13px; z-index: 100001;
     }
+  
+    /* ---------- Typography ----------
+       Filevine's own fonts. Base text 14px/1.5, small labels 12px minimum. 400 body,
+       500 labels and names, 600 headings only. Even-width digits where numbers line up. */
+    #pd9-hub-sorted, .pd9-overlay, #pd9-case, #pd9-adv, #pd9-depo, #pd9-feedbar, #pd9-switch, #pd9-triage, #pd9-whatsnew,
+    .pd9-tag-edit, #pd9-stac-find, .pd9-panel { font-variant-numeric: tabular-nums; }
+    .pd9-overlay, #pd9-case, #pd9-adv, #pd9-whatsnew, #pd9-switch, #pd9-triage, .pd9-panel { font-size: 14px; line-height: 1.5; }
+    /* Headings: the only 600s */
+    .pd9-overlay h2, .pd9-overlay h3, #pd9-adv h3, .pd9-wn-head b, .pd9-cp-title, #pd9-depo h3, #pd9-triage h3 { font-weight: 600; }
+    /* The PD9 table */
+    /* Bigger than the 13px default for easier reading on screen */
+    #pd9-hub-sorted { font-size: 14px; line-height: 1.5; --slate: #4b5565; }
+    #pd9-hub-sorted td { font-size: 14.5px; line-height: 1.45; height: 42px; }
+    #pd9-hub-sorted th { font-size: 13px; font-weight: 500; height: 34px; }
+    #pd9-hub-sorted .pd9-av { width: 28px; height: 28px; font-size: 11.5px; }
+    #pd9-hub-sorted td a, #pd9-hub-sorted td[data-key="caseNo"], #pd9-hub-sorted td[data-key="caseNo"] a, #pd9-hub-sorted td[data-key="defendant"] { font-weight: 500; }
+    #pd9-hub-sorted .pd9-when-time, #pd9-hub-sorted .pd9-none, #pd9-hub-sorted .pd9-tag, #pd9-hub-sorted .pd9-charges-btn { font-size: 13px; }
   `;
   document.head.appendChild(style);
 
   // Filevine is a single-page app, so keep watching for composers to appear.
   // Changes inside the script's own windows (search panels, tables, toasts) don't
   // need a recheck. Everything else is batched: at most one recheck every 120ms.
-  const OWN_UI = '#pd9-adv, #pd9-case, #pd9-docprev, .pd9-overlay, .pd9-panel, .fvqn-toast, #pd9-case-badge, #pd9-hub-sorted';
+  const OWN_UI = '#pd9-adv, #pd9-case, #pd9-docprev, .pd9-overlay, .pd9-panel, .fvqn-toast, #pd9-case-badge, #pd9-hub-sorted, #pd9-casepanel, .pd9-leftpane, #pd9-feedbar, #pd9-whatsnew, #pd9-switch';
   const isOwn = (node) => { const el = node && (node.nodeType === 1 ? node : node.parentElement); return !!(el && el.closest && el.closest(OWN_UI)); };
   let pending = false;
   let lastRun = 0;
@@ -8564,7 +8906,7 @@
   new MutationObserver((records) => {
     if (pending || records.every((r) => isOwn(r.target))) return;
     pending = true;
-    const wait = Math.max(0, 120 - (Date.now() - lastRun));
+    const wait = Math.max(0, 200 - (Date.now() - lastRun));
     if (wait) setTimeout(() => requestAnimationFrame(runDecorate), wait); else requestAnimationFrame(runDecorate);
   }).observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['href'] });
   pruneDrafts();
