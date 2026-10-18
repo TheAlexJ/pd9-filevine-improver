@@ -926,7 +926,7 @@
   // version. Leave one out to hide the item from that script.
   const WHATS_NEW = [
     // One list for everything new for Monday (October 19, 2026).
-    { v: '3.128.1', items: [
+    { v: '4.0.0', items: [
       { top: true, t: 'Stac view: works like the old STAC layout. Click a case in the PD9 table and it opens on the right, while your case list stays on the left. The search box at the top of the list filters your cases as you type (Enter searches all of Filevine). Up and Down step through cases. It works from the Tasks and Feed pages too: click a case there and it opens on the right with Tasks or Feed still on the left. Esc or \u00D7 closes the case. Turn it off with the "Stac mode" box above the table.' },
       '33-day check: a button above the PD9 table shows in-jail cases that are not filed and not VOP, at day 30 or later since arrest, most days first. A "33 Day" column shows the day count. Arrest dates load by themselves in the background.',
       'PD9 table tools: a filter box above the table searches it as you type (name, case number, tag, or event). A refresh button loads the project list again right away. "Osceola only" shows only case numbers that end in OS.',
