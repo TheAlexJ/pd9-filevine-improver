@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PD9 Filevine Improver
 // @namespace    https://filevine.local/pd9-improver
-// @version      3.128.2
+// @version      3.128.3
 // @description  Faster notes, tasks, and case closing in Filevine for PD9.
 // @match        https://*.filevine.com/*
 // @match        https://*.filevineapp.com/*
@@ -7954,6 +7954,11 @@
     #pd9-usearch .pd9-us-switch { position: absolute; right: 4px; top: 50%; transform: translateY(-50%); display: grid; place-items: center; width: 30px; height: 30px; padding: 0; border: 0; border-radius: 6px;
       background: transparent; color: #fff; opacity: .75; cursor: pointer; z-index: 2; }
     #pd9-usearch .pd9-us-switch:hover { opacity: 1; background: rgba(255, 255, 255, .12); }
+    /* Light mode: Filevine turns the box white when you click in it, so the text and icons need dark colors then. */
+    html:not(.pd9-dark) #pd9-usearch:focus-within .fvs-text-field-input, html:not(.pd9-dark) #pd9-usearch:focus-within input { color: #1f2933 !important; -webkit-text-fill-color: #1f2933; caret-color: #1f2933; }
+    html:not(.pd9-dark) #pd9-usearch:focus-within input::placeholder { color: #667085 !important; -webkit-text-fill-color: #667085; opacity: 1; }
+    html:not(.pd9-dark) #pd9-usearch:focus-within :is(svg, i, .material-icons, .material-symbols-outlined, .pd9-us-switch, button) { color: #475467 !important; fill: currentColor; }
+    html:not(.pd9-dark) #pd9-usearch:focus-within .pd9-us-switch:hover { background: rgba(0, 0, 0, .06); }
     #pd9-usearch.pd9-us-off { flex: none; min-width: 0; margin-right: 6px; order: 9; }
     #pd9-usearch.pd9-us-off > :first-child { display: none; }
     #pd9-usearch.pd9-us-off .pd9-us-switch { position: static; transform: none; width: 34px; height: 34px; border: 1px solid rgba(255, 255, 255, .35); }
