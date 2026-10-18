@@ -3167,7 +3167,7 @@
     const btn = vitals.cloneNode(true);
     btn.id = 'pd9-jail-btn';
     btn.dataset.url = want.url;
-    btn.title = `Search the ${want.county} County jail for ${want.name} (opens a new tab)`;
+    btn.title = `Search the ${want.county} County jail for ${want.name} (Ctrl or middle click: new tab)`;
     const icon = btn.querySelector('i');
     if (icon) {
       const hidden = icon.querySelector('.visually-hidden');
@@ -3178,14 +3178,29 @@
     const label = btn.querySelector('.vitals-btn-text') || btn.querySelector('.text-container');
     if (label) label.textContent = 'Jail Search';
     btn.style.marginRight = '8px';
+    // Click: reuse the Jail Search tab from last time. Ctrl/Cmd/Shift click or
+    // middle click: a new tab.
+    const openJail = (newTab) => {
+      if (newTab) { window.open(btn.dataset.url, '_blank', 'noopener'); return; }
+      const tab = window.open(btn.dataset.url, JAIL_WIN);
+      if (tab) { try { tab.opener = null; } catch (err) { /* ignore */ } try { tab.focus(); } catch (err) { /* ignore */ } }
+    };
     btn.addEventListener('click', (e) => {
       e.preventDefault();
       e.stopPropagation();
-      window.open(btn.dataset.url, '_blank', 'noopener');
+      openJail(e.ctrlKey || e.metaKey || e.shiftKey);
+    });
+    btn.addEventListener('mousedown', (e) => { if (e.button === 1) e.preventDefault(); }); // no autoscroll
+    btn.addEventListener('auxclick', (e) => {
+      if (e.button !== 1) return;
+      e.preventDefault();
+      e.stopPropagation();
+      openJail(true);
     });
     const holder = vitals.closest('.vitals-toggle') || vitals;
     holder.before(btn);
   }
+  const JAIL_WIN = 'pd9-jailsearch';
 
   // ---------- Deposition recorder ----------
   // A "Record Depo" button sits next to Vitals on every case. It opens a small
