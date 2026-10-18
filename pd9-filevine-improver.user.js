@@ -3182,8 +3182,10 @@
     // middle click: a new tab.
     const openJail = (newTab) => {
       if (newTab) { window.open(btn.dataset.url, '_blank', 'noopener'); return; }
+      // Keep the link to the tab (no opener = null): the browser only finds a
+      // named tab again if this page opened it and is still tied to it.
       const tab = window.open(btn.dataset.url, JAIL_WIN);
-      if (tab) { try { tab.opener = null; } catch (err) { /* ignore */ } try { tab.focus(); } catch (err) { /* ignore */ } }
+      if (tab) { try { tab.focus(); } catch (err) { /* ignore */ } }
     };
     btn.addEventListener('click', (e) => {
       e.preventDefault();
