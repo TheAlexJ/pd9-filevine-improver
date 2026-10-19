@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PD9 Filevine Improver
 // @namespace    https://filevine.local/pd9-improver
-// @version      4.0.1
+// @version      4.0.4
 // @description  Faster notes, tasks, and case closing in Filevine for PD9.
 // @match        https://*.filevine.com/*
 // @match        https://*.filevineapp.com/*
@@ -4050,17 +4050,25 @@
     }
     const hits = [];
     for (let skip = 0; skip < 2000; skip += 200) {
-      const res = await fetch('/api/projectHub/search', {
-        method: 'POST', credentials: 'include',
-        headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ...base, skip, take: 200 }),
-      });
+      const ctl = new AbortController();
+      const timer = setTimeout(() => ctl.abort(), 25000);
+      let res;
+      try {
+        res = await fetch('/api/projectHub/search', {
+          method: 'POST', credentials: 'include', signal: ctl.signal,
+          headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ...base, skip, take: 200 }),
+        });
+      } catch (err) {
+        throw new Error(err && err.name === 'AbortError' ? 'Filevine took too long to answer' : (err && err.message) || 'network error');
+      } finally { clearTimeout(timer); }
       if (!res.ok) throw new Error(`status ${res.status}`);
       const json = await res.json();
       const data = json && json.data;
       if (!data || !Array.isArray(data.hits)) throw new Error(json && json.message ? json.message : 'unexpected reply');
       hits.push(...data.hits);
       if (!data.hasMore || !data.hits.length) break;
+      if (!saved) { const st = $('#pd9-hub-sorted .pd9-hs-status'); if (st && hubTable && !hubTable.rows) st.textContent = `Loading the case list... ${hits.length}${data.total ? ` of ${data.total}` : ''}`; }
     }
     return hits.map((h) => ({
       id: String(h.projectID || h.id),
@@ -4760,7 +4768,7 @@
     wrap.textContent = '';
     const table = document.createElement('table');
     const colgroup = document.createElement('colgroup');
-    const pickW = docked ? 0 : Math.min(200, Math.max(44, +layout.widths._pick || 50));
+    const pickW = docked ? 32 : Math.min(200, Math.max(44, +layout.widths._pick || 50)); // docked: just the checkbox
     const pickCol = document.createElement('col'); pickCol.style.width = `${pickW}px`; colgroup.appendChild(pickCol);
     cols.forEach((c) => { const el = document.createElement('col'); el.style.width = `${layout.widths[c.key] || c.width}px`; el.dataset.key = c.key; colgroup.appendChild(el); });
     table.style.width = `${pickW + cols.reduce((n, c) => n + (layout.widths[c.key] || c.width), 0)}px`;
@@ -5010,6 +5018,16 @@
     if (d33On && !docked) {
       status.textContent = `33-day check: ${ready} case${ready === 1 ? '' : 's'} in jail, not filed, not VOP, at day 30 or later${d33Busy ? ' (still checking arrest dates)' : ''}.`;
     }
+    // Too many projects: probably loaded before your filters were in place.
+    let warn = ov.querySelector('.pd9-hs-warn');
+    const tooMany = !docked && !hubTable.fromCache && hubTable.rows.length >= HUB_TOO_MANY;
+    if (tooMany && !warn) {
+      warn = document.createElement('div');
+      warn.className = 'pd9-hs-warn';
+      warn.innerHTML = `<span><b>${hubTable.rows.length} projects loaded.</b> Your Project Hub filters may not have been in place yet.</span><button type="button">Check filters</button>`;
+      warn.querySelector('button').addEventListener('click', pauseForFilters);
+      ov.querySelector('.pd9-hs-bar').after(warn);
+    } else if (!tooMany && warn) warn.remove();
     let act = ov.querySelector('.pd9-bulk-bar');
     if (!act) { act = document.createElement('span'); act.className = 'pd9-bulk-bar'; ov.querySelector('.pd9-hs-bar').appendChild(act); }
     act.textContent = '';
@@ -5153,7 +5171,8 @@
     ov.querySelector('.pd9-hs-status').textContent = 'Loading the case list...';
     // Show the saved table right away (if there is one), then update it.
     try {
-      const cached = await loadHubTableCache(href);
+      // Never wait long for the saved copy (the browser's storage can hang).
+      const cached = await Promise.race([loadHubTableCache(href), sleep(1500).then(() => null)]);
       if (cached && hubTable && hubTable.href === href && !hubTable.rows && cached.rows && cached.rows.length) {
         hubTable.rows = cached.rows;
         hubTable.fromCache = cached.at;
@@ -5204,12 +5223,45 @@
   }
 
   // The "Alternate table" checkbox above the table switches between ours and Filevine's.
+  // ---------- Check filters ----------
+  // If Filevine's own filters were not in place yet when the PD9 table loaded,
+  // it loads everything (1000 projects). "Check filters" puts Filevine's table
+  // back for a moment so you can set the filters; "Confirm filters" then loads
+  // the PD9 table again with them.
+  const HUB_TOO_MANY = 1000;
+  let hubPaused = false;
+  function pauseForFilters() {
+    hubPaused = true;
+    if (side && side.open) sideClose();
+    const o = document.getElementById('pd9-hub-sorted');
+    if (o) o.remove();
+    hubTable = null;
+    showOwnTable();
+  }
+  function confirmFilters() {
+    hubPaused = false;
+    document.getElementById('pd9-confirm-filters')?.remove();
+    hubTable = null;
+    showOwnTable(true);
+  }
+  function showConfirmFilters() {
+    if (!hubPaused || !onHub()) { document.getElementById('pd9-confirm-filters')?.remove(); return; }
+    if (document.getElementById('pd9-confirm-filters')) return;
+    const bar = document.createElement('div');
+    bar.id = 'pd9-confirm-filters';
+    bar.setAttribute('role', 'status');
+    bar.innerHTML = '<span>Set your Project Hub filters here, then load the PD9 table with them.</span><button type="button" class="pd9-cf-go">Confirm filters</button>';
+    bar.querySelector('.pd9-cf-go').addEventListener('click', confirmFilters);
+    document.body.appendChild(bar);
+  }
+
   function showOwnTable(force) {
+    showConfirmFilters();
     if (!onHub()) { if (!(side && side.one && (side.open || side.opening))) hubTable = null; return; }
     const grid = $('.ag-root-wrapper');
     if (!grid) return;
     const host = grid.parentElement;
-    const useOwn = force === true || (force !== false && store.get(HUB_VIEW_KEY, true));
+    const useOwn = !hubPaused && (force === true || (force !== false && store.get(HUB_VIEW_KEY, true)));
     let ov = document.getElementById('pd9-hub-sorted');
     let toggle = document.getElementById('pd9-hub-toggle');
     if (!toggle) {
@@ -5235,7 +5287,7 @@
       if (pinnedNow) pinnedNow.after(toggle); else host.parentElement.insertBefore(toggle, host);
     }
     const box = toggle.querySelector('input');
-    if (box.checked !== useOwn) { box.checked = useOwn; box.setAttribute('aria-checked', String(useOwn)); }
+    if (!hubPaused && box.checked !== useOwn) { box.checked = useOwn; box.setAttribute('aria-checked', String(useOwn)); }
     if (!STAFF && !document.getElementById('pd9-side-toggle')) {
       const sp = toggle.cloneNode(true);
       sp.id = 'pd9-side-toggle';
@@ -8257,6 +8309,12 @@
     #pd9-hub-sorted .pd9-hs-find svg { width: 14px; height: 14px; flex: none; }
     #pd9-hub-sorted .pd9-hs-find input { width: 230px; border: 0; outline: 0; background: transparent; color: var(--ink); font: inherit; font-size: 12.5px; padding: 0; }
     html.pd9-dark #pd9-hub-sorted .pd9-hs-find { background: #1f242b; border-color: #343a44; }
+    #pd9-hub-sorted .pd9-hs-warn { display: flex; align-items: center; gap: 12px; padding: 8px 12px; background: #fffaeb; color: #93370d; border-bottom: 1px solid #fedf89; font-size: 13px; }
+    #pd9-hub-sorted .pd9-hs-warn button, #pd9-confirm-filters button { margin-left: auto; padding: 5px 12px; border-radius: 7px; border: 1px solid currentColor; background: transparent; color: inherit; font: inherit; font-weight: 600; cursor: pointer; white-space: nowrap; }
+    html.pd9-dark #pd9-hub-sorted .pd9-hs-warn { background: #2a1d0a; color: #fec84b; border-color: #4e3a12; }
+    #pd9-confirm-filters { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); z-index: 100000; display: flex; align-items: center; gap: 14px; padding: 10px 12px 10px 16px; border-radius: 10px;
+      background: #1f2933; color: #fff; font-size: 14px; box-shadow: 0 12px 32px rgba(0, 0, 0, .3); }
+    #pd9-confirm-filters button { background: #2fbfae; border-color: #2fbfae; color: #0b1f1d; }
     #pd9-hub-sorted .pd9-hs-refresh { display: inline-grid; place-items: center; margin-left: 6px; padding: 0; width: 28px; height: 26px; }
     #pd9-hub-sorted .pd9-hs-refresh:disabled { opacity: .6; cursor: default; }
     #pd9-hub-sorted .pd9-hs-refresh.pd9-rf-spin svg { animation: pd9-rf-rot 1s linear infinite; }
@@ -8781,8 +8839,12 @@
     html.pd9-dark .pd9-field-btn { background: #1b1f24; border-color: #3a414b; color: #5fd4c4; }
     html.pd9-dark .pd9-field-btn:hover { background: #17302d; }
     /* ---------- Stac mode (case next to the PD9 table) ---------- */
-    #pd9-hub-sorted.pd9-hs-docked .pd9-pick { padding: 0 !important; visibility: hidden; overflow: hidden; }
-    #pd9-hub-sorted.pd9-hs-docked .pd9-bulk-bar { display: none; }
+    /* Next to an open case: checkboxes stay (no pins), and the Add note / Add task bar gets its own line. */
+    #pd9-hub-sorted.pd9-hs-docked .pd9-pick { padding: 0 0 0 10px !important; overflow: hidden; }
+    #pd9-hub-sorted.pd9-hs-docked .pd9-pick .pd9-pin-btn, #pd9-hub-sorted.pd9-hs-docked .pd9-pick .pd9-col-grip { display: none; }
+    #pd9-hub-sorted.pd9-hs-docked .pd9-bulk-bar { flex: 1 1 100%; flex-wrap: wrap; gap: 6px; margin-left: 0; }
+    #pd9-hub-sorted.pd9-hs-docked .pd9-bulk-bar:empty { display: none; }
+    #pd9-hub-sorted.pd9-hs-docked .pd9-bulk-btn { padding: 3px 9px; }
     #pd9-hub-sorted.pd9-hs-docked tbody tr.pd9-row-open td:nth-child(2) { box-shadow: inset 3px 0 0 var(--accent); }
     #pd9-hub-sorted tbody tr { cursor: pointer; }
     #pd9-hub-sorted tbody tr.pd9-row-open td { background: #e3f1f0 !important; }
