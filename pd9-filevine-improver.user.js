@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PD9 Filevine Improver
 // @namespace    https://filevine.local/pd9-improver
-// @version      4.0.0
+// @version      4.0.1
 // @description  Faster notes, tasks, and case closing in Filevine for PD9.
 // @match        https://*.filevine.com/*
 // @match        https://*.filevineapp.com/*
@@ -5920,6 +5920,10 @@
   const DARK_KEY = 'pd9-dark';
   const DARK_SKIP = /\/docwebviewer\//i.test(location.pathname); // Filevine's file viewer: leave files as they are
   const darkOn = () => !!store.get(DARK_KEY, false);
+  // Filevine's own dark theme (picked in Filevine, not with the Improver's switch):
+  // our windows and the PD9 table go dark with it too.
+  const fvDarkTheme = () => /--theme-name:\s*[a-z-]*dark/i.test(document.documentElement.getAttribute('style') || '');
+  const darkLook = () => darkOn() || fvDarkTheme();
   let lightTheme = null; // Filevine's own theme name, to put back
   function setThemeAttr(dark) {
     const root = document.documentElement;
@@ -5936,9 +5940,9 @@
   function applyDark() {
     if (DARK_SKIP) return;
     const on = darkOn();
-    document.documentElement.classList.toggle('pd9-dark', on);
     if (on || document.documentElement.classList.contains('pd9-was-dark')) setThemeAttr(on);
     document.documentElement.classList.toggle('pd9-was-dark', on);
+    document.documentElement.classList.toggle('pd9-dark', darkLook());
     $$('[data-pd9-dark] .pd9-dark-state').forEach((el) => { el.textContent = on ? 'On' : 'Off'; });
     applySeason();
   }
@@ -5971,7 +5975,7 @@
   }
   const seasonLook = () => { const v = seasonNow(); return v === 'auto' ? calendarSeason() : v; };
   function applySeason() {
-    const look = !DARK_SKIP && !darkOn() ? seasonLook() : '';
+    const look = !DARK_SKIP && !darkLook() ? seasonLook() : '';
     const root = document.documentElement;
     root.classList.toggle('pd9-season', !!look);
     SEASON_LOOKS.forEach((k) => root.classList.toggle(`pd9-season-${k}`, look === k));
@@ -5983,7 +5987,10 @@
   }
   // Filevine sometimes rewrites its theme (when it loads, or in a case window): keep ours.
   new MutationObserver(() => {
-    if (darkOn() && !DARK_SKIP) setThemeAttr(true);
+    if (DARK_SKIP) return;
+    if (darkOn()) setThemeAttr(true);
+    const root = document.documentElement;
+    if (root.classList.contains('pd9-dark') !== darkLook()) { root.classList.toggle('pd9-dark', darkLook()); applySeason(); }
   })
     .observe(document.documentElement, { attributes: true, attributeFilter: ['style'] });
   document.addEventListener('keydown', (e) => {
@@ -5994,7 +6001,7 @@
   window.addEventListener('focus', () => applyDark());
   setInterval(() => {
     if (document.hidden) return; // a tab in the background doesn't need it
-    if (document.documentElement.classList.contains('pd9-dark') !== darkOn()) applyDark();
+    if (document.documentElement.classList.contains('pd9-dark') !== darkLook()) applyDark();
     else applySeason(); // cheap; also catches the date rolling over to a new season
   }, 5000);
   applyDark();
